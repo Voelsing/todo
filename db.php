@@ -20,4 +20,12 @@ try {
 } catch (\PDOException $e) {
     die('Verbindungsfehler: ' . $e->getMessage());
 }
+
+// Zusätzliches MySQLi-Objekt für ältere Skripte
+$conn = new mysqli($host, $user, $pass, $db);
+if ($conn->connect_error) {
+    die('Verbindungsfehler: ' . $conn->connect_error);
+}
+$conn->set_charset($charset);
+
 ?>

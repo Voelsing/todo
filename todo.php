@@ -1,25 +1,27 @@
 <?php
-session_name('user_session');
+session_name('admin_session');
 session_start([
     'cookie_secure'   => false,
     'cookie_httponly' => true,
     'cookie_samesite' => 'Strict',
 ]);
 
-require_once __DIR__ . '/db.php';
-require_once __DIR__ . '/auth.php';
-require_once __DIR__ . '/csrf.php';
+require __DIR__ . '/db.php';
+require __DIR__ . '/csrf.php';
+csrf_token();
 
-if (!isset($_SESSION['user_id'])) {
-    header('Location: login.php');
+$allowedRoles = ['Administrator','Geschäftsstellenmitarbeiter','Präsidium','Superadmin'];
+$userRoles = $_SESSION['rollen_namen'] ?? [];
+if (!is_array($userRoles)) {
+    $userRoles = [$userRoles];
+}
+if (!isset($_SESSION['admin_logged_in']) || !array_intersect($allowedRoles, $userRoles)) {
+    header('Location: index.php');
     exit;
 }
 
-// Enforce app access via roles mapping; fallback allows roles 4,3,2,1
-requireRole([4,3,2,1]);
+$adminId = (int)($_SESSION['admin_id'] ?? 0);
 
-// Current user id needed for early category queries
-$userId = (int)($_SESSION['user_id'] ?? 0);
 
 // CSRF: Alle POST-Operationen (inkl. Uploads) prüfen
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -50,7 +52,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 $conn->query(
     "CREATE TABLE IF NOT EXISTS todos (
         id INT AUTO_INCREMENT PRIMARY KEY,
-        user_id INT NOT NULL,
+        admin_id INT NOT NULL,
         description TEXT NOT NULL,
         week_start DATE NOT NULL,
         todo_date DATE NOT NULL,
@@ -63,18 +65,18 @@ $conn->query(
         archived TINYINT(1) NOT NULL DEFAULT 0,
         archived_at DATETIME DEFAULT NULL,
         sort_order INT DEFAULT NULL,
-        created_by INT DEFAULT NULL,
-        in_progress_by INT DEFAULT NULL,
+        created_by_admin INT DEFAULT NULL,
+        in_progress_by_admin INT DEFAULT NULL,
         in_progress_at DATETIME DEFAULT NULL,
         is_done TINYINT(1) NOT NULL DEFAULT 0 COMMENT '0=offen,1=erledigt,2=in_bearbeitung',
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         completed_at DATETIME DEFAULT NULL,
-        completed_by INT DEFAULT NULL,
+        completed_by_admin INT DEFAULT NULL,
         sent_scope ENUM('single','users','all') NOT NULL DEFAULT 'single',
         dispatch_group VARCHAR(32) DEFAULT NULL,
         title VARCHAR(100) DEFAULT NULL,
-        INDEX idx_user_week (user_id, week_start),
-        INDEX idx_user_date (user_id, todo_date)
+        INDEX idx_admin_week (admin_id, week_start),
+        INDEX idx_admin_date (admin_id, todo_date)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci"
 );
 
@@ -84,7 +86,7 @@ $res = $conn->query("SHOW COLUMNS FROM todos LIKE 'todo_date'");
 if ($res) { $hasTodoDate = $res->num_rows > 0; $res->close(); }
 if (!$hasTodoDate) {
     $conn->query("ALTER TABLE todos ADD COLUMN todo_date DATE NOT NULL AFTER week_start");
-    $conn->query("ALTER TABLE todos ADD INDEX idx_user_date (user_id, todo_date)");
+    $conn->query("ALTER TABLE todos ADD INDEX idx_admin_date (admin_id, todo_date)");
     $conn->query("UPDATE todos SET todo_date = week_start WHERE todo_date IS NULL OR todo_date = '0000-00-00'");
 }
 // Add priority column for older installs
@@ -108,21 +110,21 @@ if ($res5) { $res5->close(); }
 $res6 = $conn->query("SHOW COLUMNS FROM todos LIKE 'sort_order'");
 if ($res6 && $res6->num_rows === 0) { $conn->query("ALTER TABLE todos ADD COLUMN sort_order INT NULL AFTER due_time"); }
 if ($res6) { $res6->close(); }
-// created_by for audit
-$res7 = $conn->query("SHOW COLUMNS FROM todos LIKE 'created_by'");
-if ($res7 && $res7->num_rows === 0) { $conn->query("ALTER TABLE todos ADD COLUMN created_by INT NULL AFTER sort_order"); }
+// created_by_admin for audit
+$res7 = $conn->query("SHOW COLUMNS FROM todos LIKE 'created_by_admin'");
+if ($res7 && $res7->num_rows === 0) { $conn->query("ALTER TABLE todos ADD COLUMN created_by_admin INT NULL AFTER sort_order"); }
 if ($res7) { $res7->close(); }
 // Track who set a task to in-progress
-$resIP = $conn->query("SHOW COLUMNS FROM todos LIKE 'in_progress_by'");
-if ($resIP && $resIP->num_rows === 0) { $conn->query("ALTER TABLE todos ADD COLUMN in_progress_by INT NULL AFTER created_by"); }
+$resIP = $conn->query("SHOW COLUMNS FROM todos LIKE 'in_progress_by_admin'");
+if ($resIP && $resIP->num_rows === 0) { $conn->query("ALTER TABLE todos ADD COLUMN in_progress_by_admin INT NULL AFTER created_by_admin"); }
 if ($resIP) { $resIP->close(); }
 // Track when a task was set to in-progress
 $resIPat = $conn->query("SHOW COLUMNS FROM todos LIKE 'in_progress_at'");
-if ($resIPat && $resIPat->num_rows === 0) { $conn->query("ALTER TABLE todos ADD COLUMN in_progress_at DATETIME NULL AFTER in_progress_by"); }
+if ($resIPat && $resIPat->num_rows === 0) { $conn->query("ALTER TABLE todos ADD COLUMN in_progress_at DATETIME NULL AFTER in_progress_by_admin"); }
 if ($resIPat) { $resIPat->close(); }
 // Add title column for subject
 $resTitle = $conn->query("SHOW COLUMNS FROM todos LIKE 'title'");
-if ($resTitle && $resTitle->num_rows === 0) { $conn->query("ALTER TABLE todos ADD COLUMN title VARCHAR(100) NULL AFTER user_id"); }
+if ($resTitle && $resTitle->num_rows === 0) { $conn->query("ALTER TABLE todos ADD COLUMN title VARCHAR(100) NULL AFTER admin_id"); }
 if ($resTitle) { $resTitle->close(); }
 // Add sent_scope/dispatch_group for grouping sent-to-all
 $resScope = $conn->query("SHOW COLUMNS FROM todos LIKE 'sent_scope'");
@@ -132,8 +134,8 @@ $resGroup = $conn->query("SHOW COLUMNS FROM todos LIKE 'dispatch_group'");
 if ($resGroup && $resGroup->num_rows === 0) { $conn->query("ALTER TABLE todos ADD COLUMN dispatch_group VARCHAR(32) NULL AFTER sent_scope"); }
 if ($resGroup) { $resGroup->close(); }
 // Track who completed a task
-$resCompBy = $conn->query("SHOW COLUMNS FROM todos LIKE 'completed_by'");
-if ($resCompBy && $resCompBy->num_rows === 0) { $conn->query("ALTER TABLE todos ADD COLUMN completed_by INT NULL AFTER completed_at"); }
+$resCompBy = $conn->query("SHOW COLUMNS FROM todos LIKE 'completed_by_admin'");
+if ($resCompBy && $resCompBy->num_rows === 0) { $conn->query("ALTER TABLE todos ADD COLUMN completed_by_admin INT NULL AFTER completed_at"); }
 if ($resCompBy) { $resCompBy->close(); }
 // Ensure is_done can represent "in Bearbeitung"
 $resDoneCol = $conn->query("SHOW FULL COLUMNS FROM todos LIKE 'is_done'");
@@ -151,20 +153,20 @@ $conn->query(
         id INT AUTO_INCREMENT PRIMARY KEY,
         name VARCHAR(100) NOT NULL,
         sort_order INT NULL,
-        owner_id INT NULL,
-        created_by INT NULL,
+        owner_admin_id INT NULL,
+        created_by_admin INT NULL,
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        KEY idx_owner (owner_id),
-        KEY idx_created_by (created_by)
+        KEY idx_owner_admin (owner_admin_id),
+        KEY idx_created_by_admin (created_by_admin)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci"
 );
 // Per-user category sharing table
 $conn->query(
     "CREATE TABLE IF NOT EXISTS todo_category_shares (
         category_id INT NOT NULL,
-        user_id INT NOT NULL,
-        PRIMARY KEY(category_id, user_id),
-        KEY idx_share_user (user_id)
+        admin_id INT NOT NULL,
+        PRIMARY KEY(category_id, admin_id),
+        KEY idx_share_admin (admin_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci"
 );
 
@@ -172,29 +174,29 @@ $conn->query(
 $conn->query(
     "CREATE TABLE IF NOT EXISTS todo_assignees (
         todo_id INT NOT NULL,
-        user_id INT NOT NULL,
-        PRIMARY KEY(todo_id, user_id),
-        KEY idx_ta_user (user_id)
+        admin_id INT NOT NULL,
+        PRIMARY KEY(todo_id, admin_id),
+        KEY idx_ta_admin (admin_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci"
 );
 
 // Forward log table (who forwarded a To-Do to whom)
 // (Weiterleiten-Log wurde entfernt)
-// Migrate older installs: add owner_id, adjust indexes
+// Migrate older installs: add owner_admin_id, adjust indexes
 $hasOwner = false;
-$resOwner = $conn->query("SHOW COLUMNS FROM todo_categories LIKE 'owner_id'");
+$resOwner = $conn->query("SHOW COLUMNS FROM todo_categories LIKE 'owner_admin_id'");
 if ($resOwner) { $hasOwner = $resOwner->num_rows > 0; $resOwner->close(); }
 if (!$hasOwner) {
-    $conn->query("ALTER TABLE todo_categories ADD COLUMN owner_id INT NULL AFTER sort_order");
-    $conn->query("ALTER TABLE todo_categories ADD INDEX idx_owner (owner_id)");
+    $conn->query("ALTER TABLE todo_categories ADD COLUMN owner_admin_id INT NULL AFTER sort_order");
+    $conn->query("ALTER TABLE todo_categories ADD INDEX idx_owner_admin (owner_admin_id)");
 }
-// Ensure created_by exists
+// Ensure created_by_admin exists
 $hasCreatedBy = false;
-$resCreatedBy = $conn->query("SHOW COLUMNS FROM todo_categories LIKE 'created_by'");
+$resCreatedBy = $conn->query("SHOW COLUMNS FROM todo_categories LIKE 'created_by_admin'");
 if ($resCreatedBy) { $hasCreatedBy = $resCreatedBy->num_rows > 0; $resCreatedBy->close(); }
 if (!$hasCreatedBy) {
-    $conn->query("ALTER TABLE todo_categories ADD COLUMN created_by INT NULL AFTER owner_id");
-    $conn->query("ALTER TABLE todo_categories ADD INDEX idx_created_by (created_by)");
+    $conn->query("ALTER TABLE todo_categories ADD COLUMN created_by_admin INT NULL AFTER owner_admin_id");
+    $conn->query("ALTER TABLE todo_categories ADD INDEX idx_created_by_admin (created_by_admin)");
 }
 // Drop any unique indexes on category names to allow duplicates
 $hasUniqName = false;
@@ -209,7 +211,7 @@ if ($hasUniqOwnerName) { $conn->query("ALTER TABLE todo_categories DROP INDEX un
 // Add category_id on todos for single-category assignment
 $resCatCol = $conn->query("SHOW COLUMNS FROM todos LIKE 'category_id'");
 if ($resCatCol && $resCatCol->num_rows === 0) {
-    $conn->query("ALTER TABLE todos ADD COLUMN category_id INT NULL AFTER created_by");
+    $conn->query("ALTER TABLE todos ADD COLUMN category_id INT NULL AFTER created_by_admin");
     $conn->query("ALTER TABLE todos ADD INDEX idx_category (category_id)");
 }
 if ($resCatCol) { $resCatCol->close(); }
@@ -218,7 +220,7 @@ if ($resCatCol) { $resCatCol->close(); }
 // Ensure default category "Eigene Aufgaben" exists and fetch its id
 $defaultCatId = null;
 $defaultCatName = 'Eigene Aufgaben';
-$stmtDefSel = $conn->prepare('SELECT id FROM todo_categories WHERE name = ? AND owner_id IS NULL LIMIT 1');
+$stmtDefSel = $conn->prepare('SELECT id FROM todo_categories WHERE name = ? AND owner_admin_id IS NULL LIMIT 1');
 if ($stmtDefSel) {
     $stmtDefSel->bind_param('s', $defaultCatName);
     $stmtDefSel->execute();
@@ -227,10 +229,10 @@ if ($stmtDefSel) {
     $stmtDefSel->close();
 }
 if (!$defaultCatId) {
-    $stmtDefIns = $conn->prepare('INSERT IGNORE INTO todo_categories (name, sort_order, owner_id, created_by) VALUES (?, 1, NULL, ?)');
-    if ($stmtDefIns) { $stmtDefIns->bind_param('si', $defaultCatName, $userId); $stmtDefIns->execute(); $stmtDefIns->close(); }
+    $stmtDefIns = $conn->prepare('INSERT IGNORE INTO todo_categories (name, sort_order, owner_admin_id, created_by_admin) VALUES (?, 1, NULL, ?)');
+    if ($stmtDefIns) { $stmtDefIns->bind_param('si', $defaultCatName, $adminId); $stmtDefIns->execute(); $stmtDefIns->close(); }
     // re-read id
-    $stmtDefSel2 = $conn->prepare('SELECT id FROM todo_categories WHERE name = ? AND owner_id IS NULL LIMIT 1');
+    $stmtDefSel2 = $conn->prepare('SELECT id FROM todo_categories WHERE name = ? AND owner_admin_id IS NULL LIMIT 1');
     if ($stmtDefSel2) {
         $stmtDefSel2->bind_param('s', $defaultCatName);
         $stmtDefSel2->execute();
@@ -243,11 +245,11 @@ if (!$defaultCatId) {
 // Build category id->name map for display
 $catMap = [];
 // Map categories visible to the selected user context (for display)
-// Note: $selectedUserId might not be initialized yet at this point; fallback to current $userId
-$catViewerId = isset($selectedUserId) ? (int)$selectedUserId : (int)$userId;
+// Note: $selectedAdminId might not be initialized yet at this point; fallback to current $adminId
+$catViewerId = isset($selectedAdminId) ? (int)$selectedAdminId : (int)$adminId;
 $resCatMap = $conn->query(
-    "SELECT id, name FROM todo_categories WHERE owner_id IS NULL OR owner_id = " . $catViewerId .
-    " OR id IN (SELECT category_id FROM todo_category_shares WHERE user_id = " . $catViewerId . ")"
+    "SELECT id, name FROM todo_categories WHERE owner_admin_id IS NULL OR owner_admin_id = " . $catViewerId .
+    " OR id IN (SELECT category_id FROM todo_category_shares WHERE admin_id = " . $catViewerId . ")"
 );
 if ($resCatMap) {
     while ($r = $resCatMap->fetch_assoc()) { $catMap[(int)$r['id']] = (string)$r['name']; }
@@ -473,13 +475,13 @@ function computeDueByPriority(?string $startYmd, string $prio): ?string {
     return $d->format('Y-m-d');
 }
 
-$userId = (int)$_SESSION['user_id'];
+$adminId = (int)$_SESSION['admin_id'];
 $roleId = currentRole();
 $canSelectUser = in_array((int)$roleId, [1,2], true); // controls header user filter + destructive rights
 
 // Load user list for modal assignment (everyone may assign To-Dos to others)
 $allUsers = [];
-$resU = $conn->query("SELECT id, COALESCE(NULLIF(TRIM(CONCAT(vorname, ' ', nachname)), ''), email) AS name FROM user WHERE aktiv = 1 ORDER BY name ASC");
+$resU = $conn->query("SELECT id, COALESCE(NULLIF(TRIM(CONCAT(vorname, ' ', nachname)), ''), email) AS name FROM admins WHERE aktiv = 1 ORDER BY name ASC");
 if ($resU) {
     while ($row = $resU->fetch_assoc()) { $allUsers[] = $row; }
     $resU->close();
@@ -492,10 +494,10 @@ if ($selectedWeek === '') {
 }
 $weekStart = isoWeekToMonday($selectedWeek);
 // Selected user for viewing (admins can select)
-$selectedUserId = $userId;
+$selectedAdminId = $adminId;
 if ($canSelectUser) {
-    $tmp = (int)($_GET['user'] ?? $userId);
-    if ($tmp > 0) { $selectedUserId = $tmp; }
+    $tmp = (int)($_GET['user'] ?? $adminId);
+    if ($tmp > 0) { $selectedAdminId = $tmp; }
 }
 // Compute end of the selected week (7 days)
 $weekEndObj = DateTime::createFromFormat('Y-m-d', $weekStart) ?: new DateTime();
@@ -552,14 +554,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     // Manual archive button: archive all done tasks for the current scope
     if (isset($_POST['archive_now']) && $_POST['archive_now'] == '1') {
-        $scopeUser = (int)($_POST['view_user'] ?? $selectedUserId);
+        $scopeUser = (int)($_POST['view_user'] ?? $selectedAdminId);
         if ($canSelectUser) {
-            $stmt = $conn->prepare("UPDATE todos SET archived = 1, archived_at = IFNULL(archived_at, NOW()) WHERE user_id = ? AND is_done = 1 AND archived = 0");
+            $stmt = $conn->prepare("UPDATE todos SET archived = 1, archived_at = IFNULL(archived_at, NOW()) WHERE admin_id = ? AND is_done = 1 AND archived = 0");
             if ($stmt) { $stmt->bind_param('i', $scopeUser); $stmt->execute(); $stmt->close(); }
         } else {
             // Only own tasks
-            $stmt = $conn->prepare("UPDATE todos SET archived = 1, archived_at = IFNULL(archived_at, NOW()) WHERE user_id = ? AND is_done = 1 AND archived = 0");
-            if ($stmt) { $stmt->bind_param('i', $userId); $stmt->execute(); $stmt->close(); }
+            $stmt = $conn->prepare("UPDATE todos SET archived = 1, archived_at = IFNULL(archived_at, NOW()) WHERE admin_id = ? AND is_done = 1 AND archived = 0");
+            if ($stmt) { $stmt->bind_param('i', $adminId); $stmt->execute(); $stmt->close(); }
         }
         // Redirect back preserving current GET filters
         $qs = $_GET; $url = 'todo.php'; if (!empty($qs)) { $url .= '?' . http_build_query($qs); }
@@ -573,13 +575,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $newId = 0;
         if ($name !== '') {
             $next = 1;
-            $resSO = $conn->query("SELECT COALESCE(MAX(sort_order),0) AS m FROM todo_categories WHERE owner_id = " . (int)$userId);
+            $resSO = $conn->query("SELECT COALESCE(MAX(sort_order),0) AS m FROM todo_categories WHERE owner_admin_id = " . (int)$adminId);
             if ($resSO && ($r = $resSO->fetch_assoc())) { $next = ((int)$r['m']) + 1; }
             if ($resSO) { $resSO->close(); }
-            $stmt = $conn->prepare('INSERT IGNORE INTO todo_categories (name, sort_order, owner_id, created_by) VALUES (?, ?, ?, ?)');
-            if ($stmt) { $stmt->bind_param('siii', $name, $next, $userId, $userId); $stmt->execute(); $stmt->close(); }
-            $stmt2 = $conn->prepare('SELECT id FROM todo_categories WHERE name = ? AND owner_id = ?');
-            if ($stmt2) { $stmt2->bind_param('si', $name, $userId); $stmt2->execute(); $res2 = $stmt2->get_result(); if ($row2 = $res2->fetch_assoc()) { $newId = (int)$row2['id']; } $stmt2->close(); }
+            $stmt = $conn->prepare('INSERT IGNORE INTO todo_categories (name, sort_order, owner_admin_id, created_by_admin) VALUES (?, ?, ?, ?)');
+            if ($stmt) { $stmt->bind_param('siii', $name, $next, $adminId, $adminId); $stmt->execute(); $stmt->close(); }
+            $stmt2 = $conn->prepare('SELECT id FROM todo_categories WHERE name = ? AND owner_admin_id = ?');
+            if ($stmt2) { $stmt2->bind_param('si', $name, $adminId); $stmt2->execute(); $res2 = $stmt2->get_result(); if ($row2 = $res2->fetch_assoc()) { $newId = (int)$row2['id']; } $stmt2->close(); }
         }
         if ($ajax) {
             header('Content-Type: application/json');
@@ -600,10 +602,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($catId > 0 && $newName !== '') {
             // Check owner of category
             $owner = null;
-            $stmtS = $conn->prepare('SELECT owner_id FROM todo_categories WHERE id = ?');
+            $stmtS = $conn->prepare('SELECT owner_admin_id FROM todo_categories WHERE id = ?');
             if ($stmtS) { $stmtS->bind_param('i', $catId); $stmtS->execute(); $stmtS->bind_result($owner); $stmtS->fetch(); $stmtS->close(); }
             $isGlobal = ($owner === null);
-            $allowed = ($owner == $userId) || ($isGlobal && $canSelectUser);
+            $allowed = ($owner == $adminId) || ($isGlobal && $canSelectUser);
             if ($allowed) {
                 $stmt = $conn->prepare('UPDATE todo_categories SET name = ? WHERE id = ?');
                 if ($stmt) { $stmt->bind_param('si', $newName, $catId); $stmt->execute(); $stmt->close(); }
@@ -621,13 +623,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($catId > 0) {
             // Allow deleting own categories or global categories for admins ($canSelectUser)
             $owner = null;
-            $stmtChk = $conn->prepare('SELECT owner_id FROM todo_categories WHERE id = ?');
+            $stmtChk = $conn->prepare('SELECT owner_admin_id FROM todo_categories WHERE id = ?');
             if ($stmtChk) {
                 $stmtChk->bind_param('i', $catId);
                 $stmtChk->execute();
                 $stmtChk->bind_result($owner);
                 if ($stmtChk->fetch()) {
-                    $isOwn = ($owner == $userId);
+                    $isOwn = ($owner == $adminId);
                     $isGlobal = ($owner === null);
                     $allowed = $isOwn || ($isGlobal && $canSelectUser);
                 } else { $allowed = false; }
@@ -649,21 +651,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($action === 'edit_category') {
         $catId    = (int)($_POST['cat_id'] ?? 0);
         $newName  = trim($_POST['new_name'] ?? '');
-        $shareIds = array_map('intval', $_POST['share_user_ids'] ?? []);
+        $shareIds = array_map('intval', $_POST['share_admin_ids'] ?? []);
         if ($catId > 0) {
             // Ensure current user owns the category before editing
             $ownerId = null;
-            if ($stmtOwn = $conn->prepare('SELECT owner_id FROM todo_categories WHERE id = ?')) {
+            if ($stmtOwn = $conn->prepare('SELECT owner_admin_id FROM todo_categories WHERE id = ?')) {
                 $stmtOwn->bind_param('i', $catId);
                 $stmtOwn->execute();
                 $stmtOwn->bind_result($ownerId);
                 $stmtOwn->fetch();
                 $stmtOwn->close();
             }
-            if ($ownerId == $userId) {
+            if ($ownerId == $adminId) {
                 if ($newName !== '') {
-                    $stmt = $conn->prepare('UPDATE todo_categories SET name = ? WHERE id = ? AND owner_id = ?');
-                    if ($stmt) { $stmt->bind_param('sii', $newName, $catId, $userId); $stmt->execute(); $stmt->close(); }
+                    $stmt = $conn->prepare('UPDATE todo_categories SET name = ? WHERE id = ? AND owner_admin_id = ?');
+                    if ($stmt) { $stmt->bind_param('sii', $newName, $catId, $adminId); $stmt->execute(); $stmt->close(); }
                 }
                 // Update share mappings
                 if ($stmtDel = $conn->prepare('DELETE FROM todo_category_shares WHERE category_id = ?')) {
@@ -672,9 +674,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $stmtDel->close();
                 }
                 if (!empty($shareIds)) {
-                    if ($stmtIns = $conn->prepare('INSERT INTO todo_category_shares (category_id, user_id) VALUES (?, ?)')) {
+                    if ($stmtIns = $conn->prepare('INSERT INTO todo_category_shares (category_id, admin_id) VALUES (?, ?)')) {
                         foreach ($shareIds as $sid) {
-                            if ($sid === (int)$userId) continue; // owner need not be in share table
+                            if ($sid === (int)$adminId) continue; // owner need not be in share table
                             $stmtIns->bind_param('ii', $catId, $sid);
                             $stmtIns->execute();
                         }
@@ -698,7 +700,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $ids = [];
         $catOwnerId = null;
         if ($postedCategoryId > 0) {
-            if ($stmt = $conn->prepare('SELECT owner_id FROM todo_categories WHERE id = ?')) {
+            if ($stmt = $conn->prepare('SELECT owner_admin_id FROM todo_categories WHERE id = ?')) {
                 $stmt->bind_param('i', $postedCategoryId);
                 $stmt->execute();
                 $stmt->bind_result($catOwnerId);
@@ -707,17 +709,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
             if ($catOwnerId === null) {
                 if (!empty($defaultCatId) && $postedCategoryId === (int)$defaultCatId) {
-                    $ids[(int)$userId] = true;
+                    $ids[(int)$adminId] = true;
                 } else {
                     foreach ($allUsers as $u) { $ids[(int)$u['id']] = true; }
                 }
             } else {
                 $ids[(int)$catOwnerId] = true;
             }
-            $resSh = $conn->query('SELECT user_id FROM todo_category_shares WHERE category_id = ' . $postedCategoryId);
-            if ($resSh) { while ($r = $resSh->fetch_assoc()) { $ids[(int)$r['user_id']] = true; } $resSh->close(); }
+            $resSh = $conn->query('SELECT admin_id FROM todo_category_shares WHERE category_id = ' . $postedCategoryId);
+            if ($resSh) { while ($r = $resSh->fetch_assoc()) { $ids[(int)$r['admin_id']] = true; } $resSh->close(); }
         }
-        if (empty($ids)) { $ids[(int)$userId] = true; }
+        if (empty($ids)) { $ids[(int)$adminId] = true; }
         $targetUserIds = array_keys($ids);
         $weekIn = $_POST['week'] ?? $selectedWeek;
         $ws = isoWeekToMonday($weekIn);
@@ -746,7 +748,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', (string)$repeatUntil)) { $repeatUntil = null; }
         // Insert once title is provided; description may be empty
         if ($title !== '') {
-            $creatorId = (int)($_SESSION['user_id'] ?? 0);
+            $creatorId = (int)($_SESSION['admin_id'] ?? 0);
             $ownerId = $targetUserIds[0] ?? $creatorId;
             // Determine category for owner (others share same category)
             $categoryId = (int)$postedCategoryId;
@@ -754,7 +756,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $okCat = false;
                 if ($defaultCatId && $categoryId === (int)$defaultCatId) { $okCat = true; }
                 else {
-                    $stmtC = $conn->prepare('SELECT id FROM todo_categories WHERE id = ? AND (owner_id = ? OR owner_id IS NULL OR id IN (SELECT category_id FROM todo_category_shares WHERE user_id = ?))');
+                    $stmtC = $conn->prepare('SELECT id FROM todo_categories WHERE id = ? AND (owner_admin_id = ? OR owner_admin_id IS NULL OR id IN (SELECT category_id FROM todo_category_shares WHERE admin_id = ?))');
                     if ($stmtC) { $stmtC->bind_param('iii', $categoryId, $ownerId, $ownerId); $stmtC->execute(); $resC = $stmtC->get_result(); $okCat = ($resC && $resC->num_rows>0); $stmtC->close(); }
                 }
                 if (!$okCat) { $categoryId = (int)($defaultCatId ?? 0); }
@@ -763,9 +765,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
             // Determine next sort order for owner
             $nextOrder = 1;
-            $stmtMax = $conn->prepare('SELECT COALESCE(MAX(t.sort_order), 0) AS maxo FROM todos t JOIN todo_assignees ta ON ta.todo_id = t.id WHERE ta.user_id = ? AND t.todo_date = ?');
+            $stmtMax = $conn->prepare('SELECT COALESCE(MAX(t.sort_order), 0) AS maxo FROM todos t JOIN todo_assignees ta ON ta.todo_id = t.id WHERE ta.admin_id = ? AND t.todo_date = ?');
             if ($stmtMax) { $stmtMax->bind_param('is', $ownerId, $td); $stmtMax->execute(); $resMax = $stmtMax->get_result(); if ($rowMax = $resMax->fetch_assoc()) { $nextOrder = ((int)$rowMax['maxo']) + 1; } $stmtMax->close(); }
-            $stmtIns = $conn->prepare('INSERT INTO todos (user_id, title, description, week_start, todo_date, priority, start_time, due_date, due_time, repeat_freq, repeat_until, sort_order, created_by, category_id, sent_scope, dispatch_group) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+            $stmtIns = $conn->prepare('INSERT INTO todos (admin_id, title, description, week_start, todo_date, priority, start_time, due_date, due_time, repeat_freq, repeat_until, sort_order, created_by_admin, category_id, sent_scope, dispatch_group) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
             $dispatchGroup = null; $sentScope = 'single';
             if ($stmtIns) {
                 $stmtIns->bind_param('issssssssssiiiss', $ownerId, $title, $desc, $ws, $td, $prio, $start_time, $due_date, $due_time, $repeatFreq, $repeatUntil, $nextOrder, $creatorId, $categoryId, $sentScope, $dispatchGroup);
@@ -774,7 +776,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $stmtIns->close();
                 // Insert assignees
                 if ($newId > 0) {
-                    if ($stmtA = $conn->prepare('INSERT INTO todo_assignees (todo_id, user_id) VALUES (?, ?)')) {
+                    if ($stmtA = $conn->prepare('INSERT INTO todo_assignees (todo_id, admin_id) VALUES (?, ?)')) {
                         foreach ($targetUserIds as $targetUserId) {
                             $stmtA->bind_param('ii', $newId, $targetUserId);
                             $stmtA->execute();
@@ -782,12 +784,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $stmtA->close();
                     }
                     if (!empty($_FILES['attachments']) && is_array($_FILES['attachments']['name'])) {
-                        ttHandleUploads($_FILES['attachments'], (int)($_SESSION['user_id'] ?? 0), $newId);
+                        ttHandleUploads($_FILES['attachments'], (int)($_SESSION['admin_id'] ?? 0), $newId);
                     }
                 }
             }
         }
-        $redir = 'todo.php?status=' . urlencode($postedStatus) . '&prio=' . urlencode($selectedPrio) . '&sort=' . urlencode($postedSort) . '&user=' . (int)$selectedUserId;
+        $redir = 'todo.php?status=' . urlencode($postedStatus) . '&prio=' . urlencode($selectedPrio) . '&sort=' . urlencode($postedSort) . '&user=' . (int)$selectedAdminId;
         if (!empty($postedCategoryId)) { $redir .= '&open_cat=' . (int)$postedCategoryId; }
         header('Location: ' . $redir);
         exit;
@@ -798,24 +800,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $done = (int)($_POST['done'] ?? 0);
         // permission: owner, creator or admin
         $allowed = false; $ownerId = null; $creatorId = null; $currDone = null; $inProgBy = null; $assigned = 0;
-        $stmtC = $conn->prepare('SELECT t.user_id, t.created_by, t.is_done, t.in_progress_by, EXISTS(SELECT 1 FROM todo_assignees ta WHERE ta.todo_id = t.id AND ta.user_id = ?) AS assigned FROM todos t WHERE t.id = ?');
+        $stmtC = $conn->prepare('SELECT t.admin_id, t.created_by_admin, t.is_done, t.in_progress_by_admin, EXISTS(SELECT 1 FROM todo_assignees ta WHERE ta.todo_id = t.id AND ta.admin_id = ?) AS assigned FROM todos t WHERE t.id = ?');
         if ($stmtC) {
-            $stmtC->bind_param('ii', $userId, $id);
+            $stmtC->bind_param('ii', $adminId, $id);
             $stmtC->execute();
             $stmtC->bind_result($ownerId, $creatorId, $currDone, $inProgBy, $assigned);
             if ($stmtC->fetch()) {
-                $allowed = ($assigned == 1) || ($creatorId == $userId) || $canSelectUser;
+                $allowed = ($assigned == 1) || ($creatorId == $adminId) || $canSelectUser;
             }
             $stmtC->close();
         }
-        if ($allowed && (int)$currDone === 2 && $done !== 2 && (int)$inProgBy !== (int)$userId) {
+        if ($allowed && (int)$currDone === 2 && $done !== 2 && (int)$inProgBy !== (int)$adminId) {
             $allowed = false;
         }
         if ($allowed) {
-            $stmt = $conn->prepare('UPDATE todos SET is_done = ?, completed_at = CASE WHEN ? = 1 THEN NOW() ELSE NULL END, completed_by = CASE WHEN ? = 1 THEN ? ELSE NULL END, in_progress_by = CASE WHEN ? = 2 THEN ? ELSE NULL END, in_progress_at = CASE WHEN ? = 2 THEN NOW() ELSE NULL END WHERE id = ?');
-            if ($stmt) { $stmt->bind_param('iiiiiiii', $done, $done, $done, $userId, $done, $userId, $done, $id); $stmt->execute(); $stmt->close(); }
+            $stmt = $conn->prepare('UPDATE todos SET is_done = ?, completed_at = CASE WHEN ? = 1 THEN NOW() ELSE NULL END, completed_by_admin = CASE WHEN ? = 1 THEN ? ELSE NULL END, in_progress_by_admin = CASE WHEN ? = 2 THEN ? ELSE NULL END, in_progress_at = CASE WHEN ? = 2 THEN NOW() ELSE NULL END WHERE id = ?');
+            if ($stmt) { $stmt->bind_param('iiiiiiii', $done, $done, $done, $adminId, $done, $adminId, $done, $id); $stmt->execute(); $stmt->close(); }
         }
-        $redirUser = (int)($_POST['view_user'] ?? $selectedUserId);
+        $redirUser = (int)($_POST['view_user'] ?? $selectedAdminId);
         header('Location: todo.php?status=' . urlencode($postedStatus) . '&prio=' . urlencode($selectedPrio) . '&sort=' . urlencode($postedSort) . '&user=' . $redirUser);
         exit;
     }
@@ -828,15 +830,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $newWeek = (clone $dObj)->modify('monday this week')->format('Y-m-d');
             // permission check
             $allowed = false; $creatorId = null; $isDone = null; $inProgBy = null; $inProgName = ''; $assigned = 0;
-            $stmtC = $conn->prepare('SELECT t.created_by, t.is_done, t.in_progress_by, COALESCE(NULLIF(TRIM(CONCAT(u.vorname, " ", u.nachname)), ""), u.email) AS in_progress_name, EXISTS(SELECT 1 FROM todo_assignees ta WHERE ta.todo_id = t.id AND ta.user_id = ?) AS assigned FROM todos t LEFT JOIN user u ON u.id = t.in_progress_by WHERE t.id = ?');
-            if ($stmtC) { $stmtC->bind_param('ii', $userId, $id); $stmtC->execute(); $stmtC->bind_result($creatorId, $isDone, $inProgBy, $inProgName, $assigned); if ($stmtC->fetch()) { $allowed = ($assigned == 1) || ($creatorId == $userId) || $canSelectUser; } $stmtC->close(); }
-            if ((int)$isDone === 2 && (int)$inProgBy !== (int)$userId) { http_response_code(409); echo 'Aufgabe von ' . htmlspecialchars($inProgName, ENT_QUOTES) . ' gesperrt'; exit; }
+            $stmtC = $conn->prepare('SELECT t.created_by_admin, t.is_done, t.in_progress_by_admin, COALESCE(NULLIF(TRIM(CONCAT(u.vorname, " ", u.nachname)), ""), u.email) AS in_progress_name, EXISTS(SELECT 1 FROM todo_assignees ta WHERE ta.todo_id = t.id AND ta.admin_id = ?) AS assigned FROM todos t LEFT JOIN admins u ON u.id = t.in_progress_by_admin WHERE t.id = ?');
+            if ($stmtC) { $stmtC->bind_param('ii', $adminId, $id); $stmtC->execute(); $stmtC->bind_result($creatorId, $isDone, $inProgBy, $inProgName, $assigned); if ($stmtC->fetch()) { $allowed = ($assigned == 1) || ($creatorId == $adminId) || $canSelectUser; } $stmtC->close(); }
+            if ((int)$isDone === 2 && (int)$inProgBy !== (int)$adminId) { http_response_code(409); echo 'Aufgabe von ' . htmlspecialchars($inProgName, ENT_QUOTES) . ' gesperrt'; exit; }
             if ($allowed) {
                 $stmt = $conn->prepare('UPDATE todos SET todo_date = ?, week_start = ? WHERE id = ?');
                 if ($stmt) { $stmt->bind_param('ssi', $newDate, $newWeek, $id); $stmt->execute(); $stmt->close(); }
             }
         }
-        $redirUser = (int)($_POST['view_user'] ?? $selectedUserId);
+        $redirUser = (int)($_POST['view_user'] ?? $selectedAdminId);
         header('Location: todo.php?status=' . urlencode($postedStatus) . '&prio=' . urlencode($selectedPrio) . '&sort=' . urlencode($postedSort) . '&user=' . $redirUser);
         exit;
     }
@@ -855,8 +857,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $okCat2 = false;
                 if ($defaultCatId && $newCat === (int)$defaultCatId) { $okCat2 = true; }
                 else {
-                    $stmtVC = $conn->prepare('SELECT id FROM todo_categories WHERE id = ? AND (owner_id = ? OR owner_id IS NULL OR id IN (SELECT category_id FROM todo_category_shares WHERE user_id = ?))');
-                    if ($stmtVC) { $stmtVC->bind_param('iii', $newCat, $userId, $userId); $stmtVC->execute(); $resVC = $stmtVC->get_result(); $okCat2 = ($resVC && $resVC->num_rows>0); $stmtVC->close(); }
+                    $stmtVC = $conn->prepare('SELECT id FROM todo_categories WHERE id = ? AND (owner_admin_id = ? OR owner_admin_id IS NULL OR id IN (SELECT category_id FROM todo_category_shares WHERE admin_id = ?))');
+                    if ($stmtVC) { $stmtVC->bind_param('iii', $newCat, $adminId, $adminId); $stmtVC->execute(); $resVC = $stmtVC->get_result(); $okCat2 = ($resVC && $resVC->num_rows>0); $stmtVC->close(); }
                 }
                 if (!$okCat2) { $newCat = 0; }
             }
@@ -879,9 +881,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         foreach ($ids as $tid) {
             // permission per item
             $allowed = false; $creatorId = null; $isDone = null; $inProgBy = null; $inProgName = ''; $assigned = 0;
-            $stmtC = $conn->prepare('SELECT t.created_by, t.is_done, t.in_progress_by, COALESCE(NULLIF(TRIM(CONCAT(u.vorname, " ", u.nachname)), ""), u.email) AS in_progress_name, EXISTS(SELECT 1 FROM todo_assignees ta WHERE ta.todo_id = t.id AND ta.user_id = ?) AS assigned FROM todos t LEFT JOIN user u ON u.id = t.in_progress_by WHERE t.id = ?');
-            if ($stmtC) { $stmtC->bind_param('ii', $userId, $tid); $stmtC->execute(); $stmtC->bind_result($creatorId, $isDone, $inProgBy, $inProgName, $assigned); if ($stmtC->fetch()) { $allowed = ($assigned == 1) || ($creatorId == $userId) || $canSelectUser; } $stmtC->close(); }
-            if ((int)$isDone === 2 && (int)$inProgBy !== (int)$userId) { $conn->rollback(); header('Content-Type: application/json'); echo json_encode(['ok'=>false,'error'=>'locked','user'=>$inProgName]); exit; }
+            $stmtC = $conn->prepare('SELECT t.created_by_admin, t.is_done, t.in_progress_by_admin, COALESCE(NULLIF(TRIM(CONCAT(u.vorname, " ", u.nachname)), ""), u.email) AS in_progress_name, EXISTS(SELECT 1 FROM todo_assignees ta WHERE ta.todo_id = t.id AND ta.admin_id = ?) AS assigned FROM todos t LEFT JOIN admins u ON u.id = t.in_progress_by_admin WHERE t.id = ?');
+            if ($stmtC) { $stmtC->bind_param('ii', $adminId, $tid); $stmtC->execute(); $stmtC->bind_result($creatorId, $isDone, $inProgBy, $inProgName, $assigned); if ($stmtC->fetch()) { $allowed = ($assigned == 1) || ($creatorId == $adminId) || $canSelectUser; } $stmtC->close(); }
+            if ((int)$isDone === 2 && (int)$inProgBy !== (int)$adminId) { $conn->rollback(); header('Content-Type: application/json'); echo json_encode(['ok'=>false,'error'=>'locked','user'=>$inProgName]); exit; }
             if (!$allowed) continue;
             // Persist reordering. If priority changes, also recompute and persist due_date.
             $newDueForThis = null;
@@ -974,8 +976,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $okCat = false;
             if ($defaultCatId && $categoryId === (int)$defaultCatId) { $okCat = true; }
             else {
-                $stmtC = $conn->prepare('SELECT id FROM todo_categories WHERE id = ? AND (owner_id = ? OR owner_id IS NULL OR id IN (SELECT category_id FROM todo_category_shares WHERE user_id = ?))');
-                if ($stmtC) { $stmtC->bind_param('iii', $categoryId, $userId, $userId); $stmtC->execute(); $resC = $stmtC->get_result(); $okCat = ($resC && $resC->num_rows>0); $stmtC->close(); }
+                $stmtC = $conn->prepare('SELECT id FROM todo_categories WHERE id = ? AND (owner_admin_id = ? OR owner_admin_id IS NULL OR id IN (SELECT category_id FROM todo_category_shares WHERE admin_id = ?))');
+                if ($stmtC) { $stmtC->bind_param('iii', $categoryId, $adminId, $adminId); $stmtC->execute(); $resC = $stmtC->get_result(); $okCat = ($resC && $resC->num_rows>0); $stmtC->close(); }
             }
             if (!$okCat) { $categoryId = (int)($defaultCatId ?? 0); }
         } else {
@@ -989,8 +991,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($tid > 0) {
             // permission: owner, assigned user, creator oder admin (1,2)
             $allowed = false; $ownerId = null; $creatorId = null; $assigned = 0;
-            $stmtChk = $conn->prepare('SELECT t.user_id, t.created_by, EXISTS(SELECT 1 FROM todo_assignees ta WHERE ta.todo_id = t.id AND ta.user_id = ?) AS assigned FROM todos t WHERE t.id = ?');
-            if ($stmtChk) { $stmtChk->bind_param('ii', $userId, $tid); $stmtChk->execute(); $stmtChk->bind_result($ownerId, $creatorId, $assigned); if ($stmtChk->fetch()) { $allowed = ($assigned == 1) || ($creatorId == $userId) || $canSelectUser; } $stmtChk->close(); }
+            $stmtChk = $conn->prepare('SELECT t.admin_id, t.created_by_admin, EXISTS(SELECT 1 FROM todo_assignees ta WHERE ta.todo_id = t.id AND ta.admin_id = ?) AS assigned FROM todos t WHERE t.id = ?');
+            if ($stmtChk) { $stmtChk->bind_param('ii', $adminId, $tid); $stmtChk->execute(); $stmtChk->bind_result($ownerId, $creatorId, $assigned); if ($stmtChk->fetch()) { $allowed = ($assigned == 1) || ($creatorId == $adminId) || $canSelectUser; } $stmtChk->close(); }
             if ($allowed) {
                 // Aktuelles Startdatum laden, falls nicht im Formular
                 $effectiveStart = $newStart;
@@ -1015,19 +1017,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $wantIds = [];
                 $catOwnerId2 = null;
                 if ($categoryId > 0) {
-                    $stmtCat2 = $conn->prepare('SELECT owner_id FROM todo_categories WHERE id = ?');
+                    $stmtCat2 = $conn->prepare('SELECT owner_admin_id FROM todo_categories WHERE id = ?');
                     if ($stmtCat2) { $stmtCat2->bind_param('i', $categoryId); $stmtCat2->execute(); $stmtCat2->bind_result($catOwnerId2); $stmtCat2->fetch(); $stmtCat2->close(); }
                     if ($catOwnerId2 === null) {
                         if (!empty($defaultCatId) && $categoryId === (int)$defaultCatId) {
-                            $wantIds[(int)$userId] = true;
+                            $wantIds[(int)$adminId] = true;
                         } else {
                             foreach ($allUsers as $u) { $wantIds[(int)$u['id']] = true; }
                         }
                     } else {
                         $wantIds[(int)$catOwnerId2] = true;
                     }
-                    $resSh = $conn->query('SELECT user_id FROM todo_category_shares WHERE category_id = ' . $categoryId);
-                    if ($resSh) { while ($r = $resSh->fetch_assoc()) { $wantIds[(int)$r['user_id']] = true; } $resSh->close(); }
+                    $resSh = $conn->query('SELECT admin_id FROM todo_category_shares WHERE category_id = ' . $categoryId);
+                    if ($resSh) { while ($r = $resSh->fetch_assoc()) { $wantIds[(int)$r['admin_id']] = true; } $resSh->close(); }
                 }
                 $forwardUserId = (int)($_POST['forward_user'] ?? 0);
                 if ($forwardUserId > 0 && $forwardUserId !== (int)$ownerId) {
@@ -1038,9 +1040,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
                 // Update assignee table
                 $current = [];
-                $stmtCur = $conn->prepare('SELECT user_id FROM todo_assignees WHERE todo_id = ?');
+                $stmtCur = $conn->prepare('SELECT admin_id FROM todo_assignees WHERE todo_id = ?');
                 if ($stmtCur) { $stmtCur->bind_param('i', $tid); $stmtCur->execute(); $stmtCur->bind_result($uid); while ($stmtCur->fetch()) { $current[] = (int)$uid; } $stmtCur->close(); }
-                if ($stmtAdd = $conn->prepare('INSERT INTO todo_assignees (todo_id, user_id) VALUES (?, ?)')) {
+                if ($stmtAdd = $conn->prepare('INSERT INTO todo_assignees (todo_id, admin_id) VALUES (?, ?)')) {
                     foreach ($wantIds as $uid) {
                         if (!in_array($uid, $current, true)) {
                             $stmtAdd->bind_param('ii', $tid, $uid);
@@ -1049,7 +1051,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     }
                     $stmtAdd->close();
                 }
-                if ($stmtDel = $conn->prepare('DELETE FROM todo_assignees WHERE todo_id = ? AND user_id = ?')) {
+                if ($stmtDel = $conn->prepare('DELETE FROM todo_assignees WHERE todo_id = ? AND admin_id = ?')) {
                     foreach ($current as $uid) {
                         if (!in_array($uid, $wantIds, true)) {
                             $stmtDel->bind_param('ii', $tid, $uid);
@@ -1060,15 +1062,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
                 // Besitzer auf ersten Empfänger setzen
                 $newOwner = $wantIds[0] ?? $ownerId;
-                $stmtOwner = $conn->prepare('UPDATE todos SET user_id = ? WHERE id = ?');
+                $stmtOwner = $conn->prepare('UPDATE todos SET admin_id = ? WHERE id = ?');
                 if ($stmtOwner) { $stmtOwner->bind_param('ii', $newOwner, $tid); $stmtOwner->execute(); $stmtOwner->close(); }
             }
         }
         // Handle uploads (store on disk only) into todo subfolder
         if (!empty($_FILES['attachments']) && is_array($_FILES['attachments']['name'])) {
-            ttHandleUploads($_FILES['attachments'], (int)($_SESSION['user_id'] ?? 0), $tid);
+            ttHandleUploads($_FILES['attachments'], (int)($_SESSION['admin_id'] ?? 0), $tid);
         }
-        $redirUser = (int)($_POST['view_user'] ?? $selectedUserId);
+        $redirUser = (int)($_POST['view_user'] ?? $selectedAdminId);
         header('Location: todo.php?status=' . urlencode($postedStatus) . '&prio=' . urlencode($selectedPrio) . '&sort=' . urlencode($postedSort) . '&user=' . $redirUser);
         exit;
     }
@@ -1078,9 +1080,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($tid > 0) {
             // permission: assigned user, creator oder admin/HR
             $allowed = false; $creatorId = null; $isDone = null; $inProgBy = null; $inProgName = ''; $assigned = 0;
-            $stmtChk = $conn->prepare('SELECT t.created_by, t.is_done, t.in_progress_by, COALESCE(NULLIF(TRIM(CONCAT(u.vorname, " ", u.nachname)), ""), u.email) AS in_progress_name, EXISTS(SELECT 1 FROM todo_assignees ta WHERE ta.todo_id = t.id AND ta.user_id = ?) AS assigned FROM todos t LEFT JOIN user u ON u.id = t.in_progress_by WHERE t.id = ?');
-            if ($stmtChk) { $stmtChk->bind_param('ii', $userId, $tid); $stmtChk->execute(); $stmtChk->bind_result($creatorId, $isDone, $inProgBy, $inProgName, $assigned); if ($stmtChk->fetch()) { $allowed = ($assigned == 1) || ($creatorId == $userId) || $canSelectUser; } $stmtChk->close(); }
-            if ((int)$isDone === 2 && (int)$inProgBy !== (int)$userId) { http_response_code(409); echo 'Aufgabe von ' . htmlspecialchars($inProgName, ENT_QUOTES) . ' gesperrt'; exit; }
+            $stmtChk = $conn->prepare('SELECT t.created_by_admin, t.is_done, t.in_progress_by_admin, COALESCE(NULLIF(TRIM(CONCAT(u.vorname, " ", u.nachname)), ""), u.email) AS in_progress_name, EXISTS(SELECT 1 FROM todo_assignees ta WHERE ta.todo_id = t.id AND ta.admin_id = ?) AS assigned FROM todos t LEFT JOIN admins u ON u.id = t.in_progress_by_admin WHERE t.id = ?');
+            if ($stmtChk) { $stmtChk->bind_param('ii', $adminId, $tid); $stmtChk->execute(); $stmtChk->bind_result($creatorId, $isDone, $inProgBy, $inProgName, $assigned); if ($stmtChk->fetch()) { $allowed = ($assigned == 1) || ($creatorId == $adminId) || $canSelectUser; } $stmtChk->close(); }
+            if ((int)$isDone === 2 && (int)$inProgBy !== (int)$adminId) { http_response_code(409); echo 'Aufgabe von ' . htmlspecialchars($inProgName, ENT_QUOTES) . ' gesperrt'; exit; }
             if ($allowed) {
                 // nur erledigte Aufgaben archivieren
                 $stmt = $conn->prepare('UPDATE todos SET archived = 1, archived_at = NOW() WHERE id = ? AND is_done = 1');
@@ -1102,9 +1104,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $lockedBy = null;
             foreach ($ids as $tid) {
                 $allowed = false; $ownerId = null; $creatorId = null; $isDone = null; $inProgBy = null; $inProgName = ''; $assigned = 0;
-                $stmtChk = $conn->prepare('SELECT t.user_id, t.created_by, t.is_done, t.in_progress_by, COALESCE(NULLIF(TRIM(CONCAT(u.vorname, " ", u.nachname)), ""), u.email) AS in_progress_name, EXISTS(SELECT 1 FROM todo_assignees ta WHERE ta.todo_id = t.id AND ta.user_id = ?) AS assigned FROM todos t LEFT JOIN user u ON u.id = t.in_progress_by WHERE t.id = ?');
-                if ($stmtChk) { $stmtChk->bind_param('ii', $userId, $tid); $stmtChk->execute(); $stmtChk->bind_result($ownerId, $creatorId, $isDone, $inProgBy, $inProgName, $assigned); if ($stmtChk->fetch()) { $allowed = ($assigned == 1) || ($creatorId == $userId) || $canSelectUser; } $stmtChk->close(); }
-                if ((int)$isDone === 2 && (int)$inProgBy !== (int)$userId) { $lockedBy = $inProgName; break; }
+                $stmtChk = $conn->prepare('SELECT t.admin_id, t.created_by_admin, t.is_done, t.in_progress_by_admin, COALESCE(NULLIF(TRIM(CONCAT(u.vorname, " ", u.nachname)), ""), u.email) AS in_progress_name, EXISTS(SELECT 1 FROM todo_assignees ta WHERE ta.todo_id = t.id AND ta.admin_id = ?) AS assigned FROM todos t LEFT JOIN admins u ON u.id = t.in_progress_by_admin WHERE t.id = ?');
+                if ($stmtChk) { $stmtChk->bind_param('ii', $adminId, $tid); $stmtChk->execute(); $stmtChk->bind_result($ownerId, $creatorId, $isDone, $inProgBy, $inProgName, $assigned); if ($stmtChk->fetch()) { $allowed = ($assigned == 1) || ($creatorId == $adminId) || $canSelectUser; } $stmtChk->close(); }
+                if ((int)$isDone === 2 && (int)$inProgBy !== (int)$adminId) { $lockedBy = $inProgName; break; }
                 if (!$allowed) { continue; }
                 if ($action === 'bulk_archive') {
                     // Gruppe/Scope ermitteln für mögliches Massen-Archivieren (z. B. "Gesendet an alle")
@@ -1113,11 +1115,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     if ($stmtDG) { $stmtDG->bind_param('i', $tid); $stmtDG->execute(); $stmtDG->bind_result($dgVal, $scopeVal); $stmtDG->fetch(); $stmtDG->close(); }
                     $dgVal = trim((string)$dgVal);
                     // Für gesendete Aufgaben (erstellt von mir, Besitzer ist jemand anderes) erlauben wir Archivieren auch wenn nicht erledigt
-                    if ((int)$creatorId === (int)$userId && (int)$ownerId !== (int)$userId) {
+                    if ((int)$creatorId === (int)$adminId && (int)$ownerId !== (int)$adminId) {
                         if ($dgVal !== '' && ($scopeVal === 'all' || $scopeVal === 'users')) {
                             // Ganze Gruppe archivieren
-                            $stmt = $conn->prepare('UPDATE todos SET archived = 1, archived_at = NOW() WHERE dispatch_group = ? AND created_by = ? AND archived = 0');
-                            if ($stmt) { $stmt->bind_param('si', $dgVal, $userId); $stmt->execute(); $stmt->close(); }
+                            $stmt = $conn->prepare('UPDATE todos SET archived = 1, archived_at = NOW() WHERE dispatch_group = ? AND created_by_admin = ? AND archived = 0');
+                            if ($stmt) { $stmt->bind_param('si', $dgVal, $adminId); $stmt->execute(); $stmt->close(); }
                         } else {
                             $stmt = $conn->prepare('UPDATE todos SET archived = 1, archived_at = NOW() WHERE id = ?');
                             if ($stmt) { $stmt->bind_param('i', $tid); $stmt->execute(); $stmt->close(); }
@@ -1130,8 +1132,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $stmt = $conn->prepare('UPDATE todos SET archived = 0, archived_at = NULL WHERE id = ?');
                     if ($stmt) { $stmt->bind_param('i', $tid); $stmt->execute(); $stmt->close(); }
                 } elseif ($action === 'bulk_reopen') {
-                    $stmt = $conn->prepare('UPDATE todos SET is_done = 0, completed_at = NULL, completed_by = NULL, in_progress_by = NULL, in_progress_at = NULL WHERE id = ? AND (is_done <> 2 OR in_progress_by = ?)');
-                    if ($stmt) { $stmt->bind_param('ii', $tid, $userId); $stmt->execute(); $stmt->close(); }
+                    $stmt = $conn->prepare('UPDATE todos SET is_done = 0, completed_at = NULL, completed_by_admin = NULL, in_progress_by_admin = NULL, in_progress_at = NULL WHERE id = ? AND (is_done <> 2 OR in_progress_by_admin = ?)');
+                    if ($stmt) { $stmt->bind_param('ii', $tid, $adminId); $stmt->execute(); $stmt->close(); }
                 } elseif ($action === 'bulk_delete') {
                     // Only delete archived items and clean up assignees
                     if ($stmtDelA = $conn->prepare('DELETE FROM todo_assignees WHERE todo_id = ?')) { $stmtDelA->bind_param('i', $tid); $stmtDelA->execute(); $stmtDelA->close(); }
@@ -1140,7 +1142,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
             if ($lockedBy !== null) { http_response_code(409); echo 'Aufgabe von ' . htmlspecialchars($lockedBy, ENT_QUOTES) . ' gesperrt'; exit; }
         }
-        $redirUser = (int)($_POST['view_user'] ?? $selectedUserId);
+        $redirUser = (int)($_POST['view_user'] ?? $selectedAdminId);
         header('Location: todo.php?archive=' . ($showArchive ? '1' : '0') . '&status=' . urlencode($postedStatus) . '&prio=' . urlencode($selectedPrio) . '&sort=' . urlencode($postedSort) . '&user=' . $redirUser . '&limit=' . (int)$archiveLimit . '&search=' . urlencode($archiveSearch) . '&year=' . (int)$archiveYear . '&from=' . urlencode($archiveFrom) . '&to=' . urlencode($archiveTo));
         exit;
     }
@@ -1150,8 +1152,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($tid > 0) {
             // permission: assigned user, creator oder admin/HR
             $allowed = false; $creatorId = null; $assigned = 0;
-            $stmtChk = $conn->prepare('SELECT t.created_by, EXISTS(SELECT 1 FROM todo_assignees ta WHERE ta.todo_id = t.id AND ta.user_id = ?) AS assigned FROM todos t WHERE t.id = ?');
-            if ($stmtChk) { $stmtChk->bind_param('ii', $userId, $tid); $stmtChk->execute(); $stmtChk->bind_result($creatorId, $assigned); if ($stmtChk->fetch()) { $allowed = ($assigned == 1) || ($creatorId == $userId) || $canSelectUser; } $stmtChk->close(); }
+            $stmtChk = $conn->prepare('SELECT t.created_by_admin, EXISTS(SELECT 1 FROM todo_assignees ta WHERE ta.todo_id = t.id AND ta.admin_id = ?) AS assigned FROM todos t WHERE t.id = ?');
+            if ($stmtChk) { $stmtChk->bind_param('ii', $adminId, $tid); $stmtChk->execute(); $stmtChk->bind_result($creatorId, $assigned); if ($stmtChk->fetch()) { $allowed = ($assigned == 1) || ($creatorId == $adminId) || $canSelectUser; } $stmtChk->close(); }
             if ($allowed) {
                 $stmt = $conn->prepare('UPDATE todos SET archived = 0, archived_at = NULL WHERE id = ?');
                 if ($stmt) { $stmt->bind_param('i', $tid); $stmt->execute(); $stmt->close(); }
@@ -1174,7 +1176,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if ($stmt) { $stmt->bind_param('i', $tid); $stmt->execute(); $stmt->close(); }
             }
         }
-        $redirUser = (int)($_POST['view_user'] ?? $selectedUserId);
+        $redirUser = (int)($_POST['view_user'] ?? $selectedAdminId);
         header('Location: todo.php?week=' . urlencode($selectedWeek) . '&status=' . urlencode($postedStatus) . '&prio=' . urlencode($selectedPrio) . '&sort=' . urlencode($postedSort) . '&user=' . $redirUser);
         exit;
     }
@@ -1186,8 +1188,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($tid <= 0 || $filename === '') { echo json_encode(['ok'=>false,'error'=>'bad_request']); exit; }
         // permission: assigned user, creator oder admin/HR
         $allowed = false; $creatorId = null; $assigned = 0;
-        $stmtChk = $conn->prepare('SELECT t.created_by, EXISTS(SELECT 1 FROM todo_assignees ta WHERE ta.todo_id = t.id AND ta.user_id = ?) AS assigned FROM todos t WHERE t.id = ?');
-        if ($stmtChk) { $stmtChk->bind_param('ii', $userId, $tid); $stmtChk->execute(); $stmtChk->bind_result($creatorId, $assigned); if ($stmtChk->fetch()) { $allowed = ($assigned == 1) || ($creatorId == $userId) || $canSelectUser; } $stmtChk->close(); }
+        $stmtChk = $conn->prepare('SELECT t.created_by_admin, EXISTS(SELECT 1 FROM todo_assignees ta WHERE ta.todo_id = t.id AND ta.admin_id = ?) AS assigned FROM todos t WHERE t.id = ?');
+        if ($stmtChk) { $stmtChk->bind_param('ii', $adminId, $tid); $stmtChk->execute(); $stmtChk->bind_result($creatorId, $assigned); if ($stmtChk->fetch()) { $allowed = ($assigned == 1) || ($creatorId == $adminId) || $canSelectUser; } $stmtChk->close(); }
         if (!$allowed) { echo json_encode(['ok'=>false,'error'=>'forbidden']); exit; }
         $root = __DIR__ . DIRECTORY_SEPARATOR . 'uploads_todo';
         $pathRoot = $root . DIRECTORY_SEPARATOR . $filename;
@@ -1206,32 +1208,32 @@ $todos = [];
 // Alle Aufgaben ohne Datumseinschränkung
 if ($canSelectUser) {
     // Admin/HR: Zeige Aufgaben des ausgewählten Benutzers – sowohl zugewiesene als auch von ihm erstellte
-    $baseSql = 'SELECT t.id, t.user_id, t.title, t.description, t.is_done, t.archived, t.created_at, t.completed_at, t.completed_by, t.todo_date, t.priority, t.start_time, t.due_date, t.due_time, t.repeat_freq, t.repeat_until, t.sort_order, t.created_by, t.category_id, t.sent_scope, t.dispatch_group, t.is_forwarded, t.in_progress_by, t.in_progress_at,
+    $baseSql = 'SELECT t.id, t.admin_id, t.title, t.description, t.is_done, t.archived, t.created_at, t.completed_at, t.completed_by_admin, t.todo_date, t.priority, t.start_time, t.due_date, t.due_time, t.repeat_freq, t.repeat_until, t.sort_order, t.created_by_admin, t.category_id, t.sent_scope, t.dispatch_group, t.is_forwarded, t.in_progress_by_admin, t.in_progress_at,
                        COALESCE(NULLIF(TRIM(CONCAT(uc.vorname, " ", uc.nachname)), ""), uc.email) AS creator_name,
                        COALESCE(NULLIF(TRIM(CONCAT(ur.vorname, " ", ur.nachname)), ""), ur.email) AS recipient_name,
                        COALESCE(NULLIF(TRIM(CONCAT(up.vorname, " ", up.nachname)), ""), up.email) AS in_progress_name,
                        COALESCE(NULLIF(TRIM(CONCAT(ud.vorname, " ", ud.nachname)), ""), ud.email) AS completed_name
                 FROM todos t
-                LEFT JOIN todo_assignees ta ON ta.todo_id = t.id AND ta.user_id = ?
-                LEFT JOIN user uc ON uc.id = t.created_by
-                LEFT JOIN user ur ON ur.id = ta.user_id
-                LEFT JOIN user up ON up.id = t.in_progress_by
-                LEFT JOIN user ud ON ud.id = t.completed_by
-                WHERE (ta.user_id IS NOT NULL OR t.created_by = ?) AND t.archived = ?';
+                LEFT JOIN todo_assignees ta ON ta.todo_id = t.id AND ta.admin_id = ?
+                LEFT JOIN admins uc ON uc.id = t.created_by_admin
+                LEFT JOIN admins ur ON ur.id = ta.admin_id
+                LEFT JOIN admins up ON up.id = t.in_progress_by_admin
+                LEFT JOIN admins ud ON ud.id = t.completed_by_admin
+                WHERE (ta.admin_id IS NOT NULL OR t.created_by_admin = ?) AND t.archived = ?';
 } else {
     // Für normale Benutzer: Nur Aufgaben, denen der Benutzer zugewiesen ist
-    $baseSql = 'SELECT t.id, t.user_id, t.title, t.description, t.is_done, t.archived, t.created_at, t.completed_at, t.completed_by, t.todo_date, t.priority, t.start_time, t.due_date, t.due_time, t.repeat_freq, t.repeat_until, t.sort_order, t.created_by, t.category_id, t.sent_scope, t.dispatch_group, t.is_forwarded, t.in_progress_by, t.in_progress_at,
+    $baseSql = 'SELECT t.id, t.admin_id, t.title, t.description, t.is_done, t.archived, t.created_at, t.completed_at, t.completed_by_admin, t.todo_date, t.priority, t.start_time, t.due_date, t.due_time, t.repeat_freq, t.repeat_until, t.sort_order, t.created_by_admin, t.category_id, t.sent_scope, t.dispatch_group, t.is_forwarded, t.in_progress_by_admin, t.in_progress_at,
                        COALESCE(NULLIF(TRIM(CONCAT(uc.vorname, " ", uc.nachname)), ""), uc.email) AS creator_name,
                        COALESCE(NULLIF(TRIM(CONCAT(ur.vorname, " ", ur.nachname)), ""), ur.email) AS recipient_name,
                        COALESCE(NULLIF(TRIM(CONCAT(up.vorname, " ", up.nachname)), ""), up.email) AS in_progress_name,
                        COALESCE(NULLIF(TRIM(CONCAT(ud.vorname, " ", ud.nachname)), ""), ud.email) AS completed_name
                 FROM todos t
                 JOIN todo_assignees ta ON ta.todo_id = t.id
-                LEFT JOIN user uc ON uc.id = t.created_by
-                LEFT JOIN user ur ON ur.id = ta.user_id
-                LEFT JOIN user up ON up.id = t.in_progress_by
-                LEFT JOIN user ud ON ud.id = t.completed_by
-                WHERE ta.user_id = ? AND t.archived = ?';
+                LEFT JOIN admins uc ON uc.id = t.created_by_admin
+                LEFT JOIN admins ur ON ur.id = ta.admin_id
+                LEFT JOIN admins up ON up.id = t.in_progress_by_admin
+                LEFT JOIN admins ud ON ud.id = t.completed_by_admin
+                WHERE ta.admin_id = ? AND t.archived = ?';
 }
 if ($selectedStatus === 'offen') {
     $baseSql .= ' AND t.is_done = 0';
@@ -1266,23 +1268,23 @@ if ($stmt) {
     $arch = $showArchive ? 1 : 0;
     if ($canSelectUser) {
         if ($selectedPrio !== 'alle' && $selectedRepeat !== 'alle') {
-            $stmt->bind_param('iiiss', $selectedUserId, $selectedUserId, $arch, $selectedPrio, $selectedRepeat);
+            $stmt->bind_param('iiiss', $selectedAdminId, $selectedAdminId, $arch, $selectedPrio, $selectedRepeat);
         } elseif ($selectedPrio !== 'alle') {
-            $stmt->bind_param('iiis', $selectedUserId, $selectedUserId, $arch, $selectedPrio);
+            $stmt->bind_param('iiis', $selectedAdminId, $selectedAdminId, $arch, $selectedPrio);
         } elseif ($selectedRepeat !== 'alle') {
-            $stmt->bind_param('iiis', $selectedUserId, $selectedUserId, $arch, $selectedRepeat);
+            $stmt->bind_param('iiis', $selectedAdminId, $selectedAdminId, $arch, $selectedRepeat);
         } else {
-            $stmt->bind_param('iii', $selectedUserId, $selectedUserId, $arch);
+            $stmt->bind_param('iii', $selectedAdminId, $selectedAdminId, $arch);
         }
     } else {
         if ($selectedPrio !== 'alle' && $selectedRepeat !== 'alle') {
-            $stmt->bind_param('iiss', $userId, $arch, $selectedPrio, $selectedRepeat);
+            $stmt->bind_param('iiss', $adminId, $arch, $selectedPrio, $selectedRepeat);
         } elseif ($selectedPrio !== 'alle') {
-            $stmt->bind_param('iis', $userId, $arch, $selectedPrio);
+            $stmt->bind_param('iis', $adminId, $arch, $selectedPrio);
         } elseif ($selectedRepeat !== 'alle') {
-            $stmt->bind_param('iis', $userId, $arch, $selectedRepeat);
+            $stmt->bind_param('iis', $adminId, $arch, $selectedRepeat);
         } else {
-            $stmt->bind_param('ii', $userId, $arch);
+            $stmt->bind_param('ii', $adminId, $arch);
         }
     }
     $stmt->execute();
@@ -1294,10 +1296,10 @@ if ($stmt) {
 // Group by date for columns
 // In eigener Ansicht (auch für Admin, wenn eigener Benutzer ausgewählt) gesendete Aufgaben
 // nicht in den regulären Listen (Prioritäten/Kategorien) anzeigen
-if (!$showArchive && ($canSelectUser ? ((int)$selectedUserId === (int)$userId) : true)) {
+if (!$showArchive && ($canSelectUser ? ((int)$selectedAdminId === (int)$adminId) : true)) {
     $filtered = [];
     foreach ($todos as $t) {
-        $isSentByMe = ((int)($t['created_by'] ?? 0) === (int)$userId) && ((int)($t['user_id'] ?? 0) !== (int)$userId);
+        $isSentByMe = ((int)($t['created_by_admin'] ?? 0) === (int)$adminId) && ((int)($t['admin_id'] ?? 0) !== (int)$adminId);
         if ($isSentByMe) { continue; }
         $filtered[] = $t;
     }
@@ -1323,10 +1325,10 @@ $archAssigned = [];
 $archSent = [];
 if ($showArchive) {
     foreach ($todos as $t) {
-        if ((int)($t['user_id'] ?? 0) === (int)$selectedUserId) {
+        if ((int)($t['admin_id'] ?? 0) === (int)$selectedAdminId) {
             $archAssigned[] = $t;
         }
-        if ((int)($t['created_by'] ?? 0) === (int)$selectedUserId && (int)($t['user_id'] ?? 0) !== (int)$selectedUserId) {
+        if ((int)($t['created_by_admin'] ?? 0) === (int)$selectedAdminId && (int)($t['admin_id'] ?? 0) !== (int)$selectedAdminId) {
             $archSent[] = $t;
         }
     }
@@ -1567,7 +1569,7 @@ foreach ($todos as $t) {
       <input type="hidden" name="status" value="<?= htmlspecialchars($selectedStatus, ENT_QUOTES) ?>">
       <input type="hidden" name="prio" value="<?= htmlspecialchars($selectedPrio, ENT_QUOTES) ?>">
       <input type="hidden" name="sort" value="<?= htmlspecialchars($selectedSort, ENT_QUOTES) ?>">
-      <input type="hidden" name="user" value="<?= (int)$selectedUserId ?>">
+      <input type="hidden" name="user" value="<?= (int)$selectedAdminId ?>">
       <div class="filter-item">
         <label class="form-label">Menge</label>
         <div class="position-relative">
@@ -1621,9 +1623,9 @@ foreach ($todos as $t) {
         $doneItems = [];
         foreach ($todos as $it) {
           if ((int)($it['archived'] ?? 0) === 1) continue;
-          $isSentByMe = (!$canSelectUser || ((int)$selectedUserId === (int)$userId))
-                        && ((int)($it['created_by'] ?? 0) === (int)$userId)
-                        && ((int)($it['user_id'] ?? 0) !== (int)$userId);
+          $isSentByMe = (!$canSelectUser || ((int)$selectedAdminId === (int)$adminId))
+                        && ((int)($it['created_by_admin'] ?? 0) === (int)$adminId)
+                        && ((int)($it['admin_id'] ?? 0) !== (int)$adminId);
           if ($isSentByMe) continue;
           if ((int)($it['is_done'] ?? 0) === 1) {
             $doneItems[] = $it;
@@ -1637,15 +1639,15 @@ foreach ($todos as $t) {
 
         // Gesendete Aufgaben laden (werden später angezeigt)
         $sentItems = [];
-        $sqlSent = 'SELECT t.id, t.user_id, t.title, t.description, t.is_done, t.created_at, t.completed_at, t.todo_date, t.priority, t.due_date, t.due_time, t.sort_order, t.category_id, t.sent_scope, t.dispatch_group, t.in_progress_by, t.in_progress_at,' .
+        $sqlSent = 'SELECT t.id, t.admin_id, t.title, t.description, t.is_done, t.created_at, t.completed_at, t.todo_date, t.priority, t.due_date, t.due_time, t.sort_order, t.category_id, t.sent_scope, t.dispatch_group, t.in_progress_by_admin, t.in_progress_at,' .
                    ' COALESCE(NULLIF(TRIM(CONCAT(ur.vorname, " ", ur.nachname)), ""), ur.email) AS recipient_name,' .
                    ' COALESCE(NULLIF(TRIM(CONCAT(uc.vorname, " ", uc.nachname)), ""), uc.email) AS creator_name,' .
                    ' COALESCE(NULLIF(TRIM(CONCAT(up.vorname, " ", up.nachname)), ""), up.email) AS in_progress_name' .
                    ' FROM todos t' .
-                   ' LEFT JOIN user ur ON ur.id = t.user_id' .
-                   ' LEFT JOIN user uc ON uc.id = t.created_by' .
-                   ' LEFT JOIN user up ON up.id = t.in_progress_by' .
-                   ' WHERE t.created_by = ? AND t.user_id <> ? AND t.archived = 0';
+                   ' LEFT JOIN admins ur ON ur.id = t.admin_id' .
+                   ' LEFT JOIN admins uc ON uc.id = t.created_by_admin' .
+                   ' LEFT JOIN admins up ON up.id = t.in_progress_by_admin' .
+                   ' WHERE t.created_by_admin = ? AND t.admin_id <> ? AND t.archived = 0';
         if ($selectedStatus === 'offen') { $sqlSent .= ' AND t.is_done = 0'; }
         elseif ($selectedStatus === 'bearbeitung') { $sqlSent .= ' AND t.is_done = 2'; }
         elseif ($selectedStatus === 'erledigt') { $sqlSent .= ' AND t.is_done = 1'; }
@@ -1653,8 +1655,8 @@ foreach ($todos as $t) {
         $sqlSent .= " ORDER BY t.is_done ASC, FIELD(t.priority,'niedrig','mittel','hoch'), COALESCE(t.sort_order, 999999) ASC, t.created_at ASC, t.id ASC";
         $stmtSent = $conn->prepare($sqlSent);
         if ($stmtSent) {
-          if ($selectedPrio !== 'alle') { $stmtSent->bind_param('iis', $userId, $userId, $selectedPrio); }
-          else { $stmtSent->bind_param('ii', $userId, $userId); }
+          if ($selectedPrio !== 'alle') { $stmtSent->bind_param('iis', $adminId, $adminId, $selectedPrio); }
+          else { $stmtSent->bind_param('ii', $adminId, $adminId); }
           $stmtSent->execute();
           $resSent = $stmtSent->get_result();
           while ($row = $resSent->fetch_assoc()) { $sentItems[] = $row; }
@@ -1707,17 +1709,17 @@ foreach ($todos as $t) {
                         data-desc="<?= htmlspecialchars($t['description'], ENT_QUOTES) ?>"
                         data-priority="<?= htmlspecialchars(strtolower($t['priority'] ?? 'mittel'), ENT_QUOTES) ?>"
                         data-start=""
-                        data-user-id="<?= (int)($t['user_id'] ?? 0) ?>"
+                        data-user-id="<?= (int)($t['admin_id'] ?? 0) ?>"
                         data-todo-date="<?= htmlspecialchars($t['todo_date'] ?? '', ENT_QUOTES) ?>"
                         data-due-date="<?= htmlspecialchars($t['due_date'] ?? '', ENT_QUOTES) ?>"
                         data-due-time="<?= htmlspecialchars($t['due_time'] ?? '', ENT_QUOTES) ?>"
                         data-repeat-freq="<?= htmlspecialchars($t['repeat_freq'] ?? 'none', ENT_QUOTES) ?>"
                         data-repeat-until="<?= htmlspecialchars($t['repeat_until'] ?? '', ENT_QUOTES) ?>"
                         data-category-id="<?= (int)($t['category_id'] ?? 0) ?>"
-                        data-created-by="<?= (int)($t['created_by'] ?? 0) ?>"
+                        data-created-by="<?= (int)($t['created_by_admin'] ?? 0) ?>"
                         data-created-by-name="<?= htmlspecialchars($t['creator_name'] ?? '', ENT_QUOTES) ?>"
                         data-is-done="<?= (int)($t['is_done'] ?? 0) ?>"
-                        data-in-progress-by="<?= (int)($t['in_progress_by'] ?? 0) ?>"
+                        data-in-progress-by="<?= (int)($t['in_progress_by_admin'] ?? 0) ?>"
                         data-in-progress-name="<?= htmlspecialchars($t['in_progress_name'] ?? '', ENT_QUOTES) ?>">
                     <div class="d-flex align-items-start justify-content-between">
                       <div class="me-2 card-content">
@@ -1816,17 +1818,17 @@ foreach ($todos as $t) {
           <?php
             $todoCategories = [];
             $resCats = $conn->query(
-              "SELECT id, name, owner_id, created_by FROM todo_categories " .
-              "WHERE (owner_id IS NULL OR owner_id = " . (int)$selectedUserId . ") " .
-              "   OR id IN (SELECT category_id FROM todo_category_shares WHERE user_id = " . (int)$selectedUserId . ") " .
+              "SELECT id, name, owner_admin_id, created_by_admin FROM todo_categories " .
+              "WHERE (owner_admin_id IS NULL OR owner_admin_id = " . (int)$selectedAdminId . ") " .
+              "   OR id IN (SELECT category_id FROM todo_category_shares WHERE admin_id = " . (int)$selectedAdminId . ") " .
               "ORDER BY COALESCE(sort_order,999999), name"
             );
             if ($resCats) { while($r = $resCats->fetch_assoc()){ $todoCategories[] = $r; } $resCats->close(); }
             $ownCats = []; $sharedCats = []; $globCats = [];
             foreach ($todoCategories as $c) {
               $cid = (int)$c['id']; if (!empty($defaultCatId) && $cid === (int)$defaultCatId) continue;
-              if (!isset($c['owner_id']) || $c['owner_id'] === null) { $globCats[] = $c; }
-              elseif ((int)$c['owner_id'] === (int)$selectedUserId) { $ownCats[] = $c; }
+              if (!isset($c['owner_admin_id']) || $c['owner_admin_id'] === null) { $globCats[] = $c; }
+              elseif ((int)$c['owner_admin_id'] === (int)$selectedAdminId) { $ownCats[] = $c; }
               else { $sharedCats[] = $c; }
             }
           $allCats = array_merge($ownCats, $sharedCats, $globCats);
@@ -1851,9 +1853,9 @@ foreach ($todos as $t) {
               foreach ($todos as $it) {
                 if ((int)($it['archived'] ?? 0) === 1) continue;
                 // Nicht in Kategorien anzeigen: Aufgaben, die ICH an andere gesendet habe
-                $isSentByMe = (!$canSelectUser || ((int)$selectedUserId === (int)$userId))
-                               && ((int)($it['created_by'] ?? 0) === (int)$userId)
-                               && ((int)($it['user_id'] ?? 0) !== (int)$userId);
+                $isSentByMe = (!$canSelectUser || ((int)$selectedAdminId === (int)$adminId))
+                               && ((int)($it['created_by_admin'] ?? 0) === (int)$adminId)
+                               && ((int)($it['admin_id'] ?? 0) !== (int)$adminId);
                 if ($isSentByMe) continue;
                 if ((int)($it['category_id'] ?? 0) !== (int)$cat['id']) continue;
                 $catTotal++;
@@ -1871,22 +1873,22 @@ foreach ($todos as $t) {
                 <div class="d-flex align-items-center gap-2">
                   <span class="cat-count"><?= max(0, $catTotal - $catDone) ?></span>
                   <?php
-                    $isOwn = isset($cat['owner_id']) && (int)$cat['owner_id'] === (int)$userId;
-                    $isGlobal = !isset($cat['owner_id']) || $cat['owner_id'] === null;
+                    $isOwn = isset($cat['owner_admin_id']) && (int)$cat['owner_admin_id'] === (int)$adminId;
+                    $isGlobal = !isset($cat['owner_admin_id']) || $cat['owner_admin_id'] === null;
                     // Shares für Icon-Ermittlung laden
                     $shareIds = [];
-                    $resSHicon = $conn->query('SELECT user_id FROM todo_category_shares WHERE category_id = ' . (int)$cat['id']);
-                    if ($resSHicon) { while($srI = $resSHicon->fetch_assoc()){ $shareIds[] = (int)$srI['user_id']; } $resSHicon->close(); }
+                    $resSHicon = $conn->query('SELECT admin_id FROM todo_category_shares WHERE category_id = ' . (int)$cat['id']);
+                    if ($resSHicon) { while($srI = $resSHicon->fetch_assoc()){ $shareIds[] = (int)$srI['admin_id']; } $resSHicon->close(); }
                     $hasOtherShares = false;
-                    if (!empty($shareIds) && isset($cat['owner_id'])) {
-                      foreach ($shareIds as $sid) { if ($sid !== (int)$cat['owner_id']) { $hasOtherShares = true; break; } }
+                    if (!empty($shareIds) && isset($cat['owner_admin_id'])) {
+                      foreach ($shareIds as $sid) { if ($sid !== (int)$cat['owner_admin_id']) { $hasOtherShares = true; break; } }
                     }
                     $isSharedCat = (!$isGlobal && $hasOtherShares);
                     if (!isset($userMap)) { $userMap = []; foreach ($allUsers as $u0){ $userMap[(int)$u0['id']] = $u0['name']; } }
-                    // Für globale Kategorien den Ersteller anzeigen (created_by), sonst den Besitzer (owner_id)
+                    // Für globale Kategorien den Ersteller anzeigen (created_by_admin), sonst den Besitzer (owner_admin_id)
                     $ownerNameInline = $isGlobal
-                      ? htmlspecialchars($userMap[(int)($cat['created_by'] ?? 0)] ?? 'Unbekannt', ENT_QUOTES)
-                      : htmlspecialchars($userMap[(int)$cat['owner_id']] ?? ('User '.(int)$cat['owner_id']), ENT_QUOTES);
+                      ? htmlspecialchars($userMap[(int)($cat['created_by_admin'] ?? 0)] ?? 'Unbekannt', ENT_QUOTES)
+                      : htmlspecialchars($userMap[(int)$cat['owner_admin_id']] ?? ('User '.(int)$cat['owner_admin_id']), ENT_QUOTES);
                   ?>
                   <div class="d-flex flex-column">
                     <div class="d-flex align-items-center gap-2">
@@ -1901,8 +1903,8 @@ foreach ($todos as $t) {
                       <?php if ($isOwn): ?>
                         <?php
                           $ownerName = $isGlobal
-                            ? htmlspecialchars($userMap[(int)($cat['created_by'] ?? 0)] ?? 'Unbekannt', ENT_QUOTES)
-                            : htmlspecialchars($userMap[(int)$cat['owner_id']] ?? ('User '.(int)$cat['owner_id']), ENT_QUOTES);
+                            ? htmlspecialchars($userMap[(int)($cat['created_by_admin'] ?? 0)] ?? 'Unbekannt', ENT_QUOTES)
+                            : htmlspecialchars($userMap[(int)$cat['owner_admin_id']] ?? ('User '.(int)$cat['owner_admin_id']), ENT_QUOTES);
                         ?>
                         <button type="button" class="btn btn-outline-secondary btn-icon-xs cat-edit ms-1" title="Kategorie bearbeiten"
                                 data-cat-id="<?= (int)$cat['id'] ?>" data-cat-name="<?= htmlspecialchars($cat['name'], ENT_QUOTES) ?>"
@@ -1962,17 +1964,17 @@ foreach ($todos as $t) {
                             data-desc="<?= htmlspecialchars($t['description'], ENT_QUOTES) ?>"
                            data-priority="<?= htmlspecialchars(strtolower($t['priority'] ?? 'mittel'), ENT_QUOTES) ?>"
                            data-start=""
-                           data-user-id="<?= (int)($t['user_id'] ?? 0) ?>"
+                           data-user-id="<?= (int)($t['admin_id'] ?? 0) ?>"
                            data-todo-date="<?= htmlspecialchars($t['todo_date'] ?? '', ENT_QUOTES) ?>"
                            data-due-date="<?= htmlspecialchars($t['due_date'] ?? '', ENT_QUOTES) ?>"
                            data-due-time="<?= htmlspecialchars($t['due_time'] ?? '', ENT_QUOTES) ?>"
                            data-repeat-freq="<?= htmlspecialchars($t['repeat_freq'] ?? 'none', ENT_QUOTES) ?>"
                            data-repeat-until="<?= htmlspecialchars($t['repeat_until'] ?? '', ENT_QUOTES) ?>"
                            data-category-id="<?= (int)($t['category_id'] ?? 0) ?>"
-                           data-created-by="<?= (int)($t['created_by'] ?? 0) ?>"
+                           data-created-by="<?= (int)($t['created_by_admin'] ?? 0) ?>"
                            data-created-by-name="<?= htmlspecialchars($t['creator_name'] ?? '', ENT_QUOTES) ?>"
                            data-is-done="<?= (int)($t['is_done'] ?? 0) ?>"
-                           data-in-progress-by="<?= (int)($t['in_progress_by'] ?? 0) ?>"
+                           data-in-progress-by="<?= (int)($t['in_progress_by_admin'] ?? 0) ?>"
                            data-in-progress-name="<?= htmlspecialchars($t['in_progress_name'] ?? '', ENT_QUOTES) ?>">
                         <div class="d-flex align-items-start justify-content-between">
                           <div class="me-2 card-content">
@@ -2104,7 +2106,7 @@ foreach ($todos as $t) {
                   <input type="hidden" name="status" value="<?= htmlspecialchars($selectedStatus, ENT_QUOTES) ?>">
                   <input type="hidden" name="prio" value="<?= htmlspecialchars($selectedPrio, ENT_QUOTES) ?>">
                   <input type="hidden" name="sort" value="<?= htmlspecialchars($selectedSort, ENT_QUOTES) ?>">
-                  <input type="hidden" name="view_user" value="<?= (int)$selectedUserId ?>">
+                  <input type="hidden" name="view_user" value="<?= (int)$selectedAdminId ?>">
                   <button type="button" id="bulkArchiveSentBtn" class="btn btn-sm btn-outline-primary" disabled title="Ausgewählte ins Archiv">
                     <i class="bi bi-archive"></i>
                   </button>
@@ -2135,7 +2137,7 @@ foreach ($todos as $t) {
                         data-title="<?= htmlspecialchars($t['title'] ?? '', ENT_QUOTES) ?>"
                         data-desc="<?= htmlspecialchars($t['description'], ENT_QUOTES) ?>"
                        data-priority="<?= htmlspecialchars(strtolower($t['priority'] ?? 'mittel'), ENT_QUOTES) ?>"
-                       data-user-id="<?= (int)($t['user_id'] ?? 0) ?>"
+                       data-user-id="<?= (int)($t['admin_id'] ?? 0) ?>"
                        data-todo-date="<?= htmlspecialchars($t['todo_date'] ?? '', ENT_QUOTES) ?>"
                        data-due-date="<?= htmlspecialchars($t['due_date'] ?? '', ENT_QUOTES) ?>"
                        data-due-time="<?= htmlspecialchars($t['due_time'] ?? '', ENT_QUOTES) ?>"
@@ -2143,7 +2145,7 @@ foreach ($todos as $t) {
                       data-repeat-until="<?= htmlspecialchars($t['repeat_until'] ?? '', ENT_QUOTES) ?>"
                        data-category-id="<?= (int)($t['category_id'] ?? 0) ?>"
                        data-is-done="<?= (int)($t['is_done'] ?? 0) ?>"
-                       data-in-progress-by="<?= (int)($t['in_progress_by'] ?? 0) ?>"
+                       data-in-progress-by="<?= (int)($t['in_progress_by_admin'] ?? 0) ?>"
                        data-in-progress-name="<?= htmlspecialchars($t['in_progress_name'] ?? '', ENT_QUOTES) ?>">
                       <div class="form-check me-2 mt-1">
                         <input class="form-check-input bulk-select-sent" type="checkbox" value="<?= (int)$t['id'] ?>">
@@ -2224,7 +2226,7 @@ foreach ($todos as $t) {
                   <input type="hidden" name="status" value="<?= htmlspecialchars($selectedStatus, ENT_QUOTES) ?>">
                   <input type="hidden" name="prio" value="<?= htmlspecialchars($selectedPrio, ENT_QUOTES) ?>">
                   <input type="hidden" name="sort" value="<?= htmlspecialchars($selectedSort, ENT_QUOTES) ?>">
-                  <input type="hidden" name="view_user" value="<?= (int)$selectedUserId ?>">
+                  <input type="hidden" name="view_user" value="<?= (int)$selectedAdminId ?>">
                   <input type="hidden" name="limit" value="<?= (int)$archiveLimit ?>">
                   <input type="hidden" name="search" value="<?= htmlspecialchars($archiveSearch, ENT_QUOTES) ?>">
                   <input type="hidden" name="year" value="<?= $archiveYear ? (int)$archiveYear : '' ?>">
@@ -2248,7 +2250,7 @@ foreach ($todos as $t) {
                   <input type="hidden" name="status" value="<?= htmlspecialchars($selectedStatus, ENT_QUOTES) ?>">
                   <input type="hidden" name="prio" value="<?= htmlspecialchars($selectedPrio, ENT_QUOTES) ?>">
                   <input type="hidden" name="sort" value="<?= htmlspecialchars($selectedSort, ENT_QUOTES) ?>">
-                  <input type="hidden" name="view_user" value="<?= (int)$selectedUserId ?>">
+                  <input type="hidden" name="view_user" value="<?= (int)$selectedAdminId ?>">
                   <button type="button" id="bulkReopenBtn" class="btn btn-sm btn-outline-secondary" disabled>
                     <i class="bi bi-arrow-counterclockwise"></i>
                   </button>
@@ -2274,7 +2276,7 @@ foreach ($todos as $t) {
                         data-title="<?= htmlspecialchars($t['title'] ?? '', ENT_QUOTES) ?>"
                         data-desc="<?= htmlspecialchars($t['description'], ENT_QUOTES) ?>"
                        data-priority="<?= htmlspecialchars(strtolower($t['priority'] ?? 'mittel'), ENT_QUOTES) ?>"
-                       data-user-id="<?= (int)($t['user_id'] ?? 0) ?>"
+                       data-user-id="<?= (int)($t['admin_id'] ?? 0) ?>"
                        data-todo-date="<?= htmlspecialchars($t['todo_date'] ?? '', ENT_QUOTES) ?>"
                        data-due-date="<?= htmlspecialchars($t['due_date'] ?? '', ENT_QUOTES) ?>"
                        data-due-time="<?= htmlspecialchars($t['due_time'] ?? '', ENT_QUOTES) ?>"
@@ -2282,7 +2284,7 @@ foreach ($todos as $t) {
                        data-repeat-until="<?= htmlspecialchars($t['repeat_until'] ?? '', ENT_QUOTES) ?>"
                        data-category-id="<?= (int)($t['category_id'] ?? 0) ?>"
                        data-is-done="<?= (int)($t['is_done'] ?? 0) ?>"
-                       data-in-progress-by="<?= (int)($t['in_progress_by'] ?? 0) ?>"
+                       data-in-progress-by="<?= (int)($t['in_progress_by_admin'] ?? 0) ?>"
                        data-in-progress-name="<?= htmlspecialchars($t['in_progress_name'] ?? '', ENT_QUOTES) ?>">
                     <div class="form-check me-2 mt-1">
                       <input class="form-check-input <?= $showArchive ? 'bulk-select-archive' : 'bulk-select-done' ?>" type="checkbox" value="<?= (int)$t['id'] ?>">
@@ -2362,7 +2364,7 @@ foreach ($todos as $t) {
                 <input type="hidden" name="status" value="<?= htmlspecialchars($selectedStatus, ENT_QUOTES) ?>">
                 <input type="hidden" name="prio" value="<?= htmlspecialchars($selectedPrio, ENT_QUOTES) ?>">
                 <input type="hidden" name="sort" value="<?= htmlspecialchars($selectedSort, ENT_QUOTES) ?>">
-                <input type="hidden" name="view_user" value="<?= (int)$selectedUserId ?>">
+                <input type="hidden" name="view_user" value="<?= (int)$selectedAdminId ?>">
                 <input type="hidden" name="limit" value="<?= (int)$archiveLimit ?>">
                 <input type="hidden" name="search" value="<?= htmlspecialchars($archiveSearch, ENT_QUOTES) ?>">
                 <input type="hidden" name="year" value="<?= $archiveYear ? (int)$archiveYear : '' ?>">
@@ -2385,7 +2387,7 @@ foreach ($todos as $t) {
                            data-title="<?= htmlspecialchars($t['title'] ?? '', ENT_QUOTES) ?>"
                            data-desc="<?= htmlspecialchars($t['description'], ENT_QUOTES) ?>"
                      data-priority="<?= htmlspecialchars(strtolower($t['priority'] ?? 'mittel'), ENT_QUOTES) ?>"
-                     data-user-id="<?= (int)($t['user_id'] ?? 0) ?>"
+                     data-user-id="<?= (int)($t['admin_id'] ?? 0) ?>"
                      data-todo-date="<?= htmlspecialchars($t['todo_date'] ?? '', ENT_QUOTES) ?>"
                      data-due-date="<?= htmlspecialchars($t['due_date'] ?? '', ENT_QUOTES) ?>"
                      data-due-time="<?= htmlspecialchars($t['due_time'] ?? '', ENT_QUOTES) ?>"
@@ -2393,7 +2395,7 @@ foreach ($todos as $t) {
                      data-repeat-until="<?= htmlspecialchars($t['repeat_until'] ?? '', ENT_QUOTES) ?>"
                     data-category-id="<?= (int)($t['category_id'] ?? 0) ?>"
                     data-is-done="<?= (int)($t['is_done'] ?? 0) ?>"
-                    data-in-progress-by="<?= (int)($t['in_progress_by'] ?? 0) ?>"
+                    data-in-progress-by="<?= (int)($t['in_progress_by_admin'] ?? 0) ?>"
                     data-in-progress-name="<?= htmlspecialchars($t['in_progress_name'] ?? '', ENT_QUOTES) ?>">
                     <div class="form-check me-2 mt-1">
                       <input class="form-check-input bulk-select-archive-sent" type="checkbox" value="<?= (int)$t['id'] ?>">
@@ -2508,7 +2510,7 @@ foreach ($todos as $t) {
                       echo '<option value="'.(int)$defaultCatId.'" data-type="private" selected>'.htmlspecialchars($defaultCatName, ENT_QUOTES).'</option>';
                       $seenCatIds[(int)$defaultCatId] = true;
                     }
-                    $ownRes = $conn->query("SELECT id, name FROM todo_categories WHERE owner_id = " . (int)$selectedUserId . " ORDER BY COALESCE(sort_order, 999999), name");
+                    $ownRes = $conn->query("SELECT id, name FROM todo_categories WHERE owner_admin_id = " . (int)$selectedAdminId . " ORDER BY COALESCE(sort_order, 999999), name");
                     if ($ownRes) {
                       while($c = $ownRes->fetch_assoc()){
                         $cid = (int)$c['id'];
@@ -2518,7 +2520,7 @@ foreach ($todos as $t) {
                       }
                       $ownRes->close();
                     }
-                    $shrRes = $conn->query("SELECT c.id, c.name FROM todo_categories c JOIN todo_category_shares s ON s.category_id = c.id WHERE s.user_id = " . (int)$selectedUserId . " ORDER BY COALESCE(c.sort_order, 999999), c.name");
+                    $shrRes = $conn->query("SELECT c.id, c.name FROM todo_categories c JOIN todo_category_shares s ON s.category_id = c.id WHERE s.admin_id = " . (int)$selectedAdminId . " ORDER BY COALESCE(c.sort_order, 999999), c.name");
                     if ($shrRes) {
                       while($c = $shrRes->fetch_assoc()){
                         $cid = (int)$c['id'];
@@ -2528,7 +2530,7 @@ foreach ($todos as $t) {
                       }
                       $shrRes->close();
                     }
-                    $globRes = $conn->query("SELECT id, name FROM todo_categories WHERE owner_id IS NULL ORDER BY COALESCE(sort_order, 999999), name");
+                    $globRes = $conn->query("SELECT id, name FROM todo_categories WHERE owner_admin_id IS NULL ORDER BY COALESCE(sort_order, 999999), name");
                     if ($globRes) {
                       while($c = $globRes->fetch_assoc()){
                         $cid = (int)$c['id'];
@@ -2617,7 +2619,7 @@ foreach ($todos as $t) {
                 <div class="mb-3">
                   <select id="forwardUser" name="forward_user" class="form-select">
                     <option value="">Nicht weitergeben</option>
-                    <?php foreach ($allUsers as $u): $uid=(int)$u['id']; if ($uid === (int)$userId) continue; $nm=htmlspecialchars($u['name'] ?? ('User '.$u['id']), ENT_QUOTES); ?>
+                    <?php foreach ($allUsers as $u): $uid=(int)$u['id']; if ($uid === (int)$adminId) continue; $nm=htmlspecialchars($u['name'] ?? ('User '.$u['id']), ENT_QUOTES); ?>
                       <option value="<?= $uid ?>"><?= $nm ?></option>
                     <?php endforeach; ?>
                   </select>
@@ -2690,9 +2692,9 @@ foreach ($todos as $t) {
           <div class="mb-3">
             <span class="form-label d-block">Teilen mit</span>
             <div class="d-flex flex-column gap-1">
-              <?php foreach ($allUsers as $u): $uid=(int)$u['id']; if ($uid === (int)$userId) continue; $nm = htmlspecialchars($u['name'] ?? ('User '.$uid), ENT_QUOTES); ?>
+              <?php foreach ($allUsers as $u): $uid=(int)$u['id']; if ($uid === (int)$adminId) continue; $nm = htmlspecialchars($u['name'] ?? ('User '.$uid), ENT_QUOTES); ?>
                 <div class="form-check">
-                  <input class="form-check-input" type="checkbox" name="share_user_ids[]" value="<?= $uid ?>" id="catShare<?= $uid ?>">
+                  <input class="form-check-input" type="checkbox" name="share_admin_ids[]" value="<?= $uid ?>" id="catShare<?= $uid ?>">
                   <label class="form-check-label" for="catShare<?= $uid ?>"><?= $nm ?></label>
                 </div>
               <?php endforeach; ?>
@@ -2733,7 +2735,7 @@ foreach ($todos as $t) {
   <script>
   // Default category id available for JS
   const DEFAULT_CAT_ID = <?php echo (int)($defaultCatId ?? 0); ?>;
-  const CURRENT_USER_ID = <?php echo (int)$userId; ?>;
+  const CURRENT_USER_ID = <?php echo (int)$adminId; ?>;
   function showInProgressModal(name){
     var msgEl = document.getElementById('inProgressMsg');
     if (msgEl){ msgEl.textContent = 'Aufgabe bereits in Bearbeitung von: ' + name; }
@@ -2806,7 +2808,7 @@ foreach ($todos as $t) {
     });
     updatePriorityStyles();
     // Suppress reminder toasts when viewing another user's list
-    var SUPPRESS_REMINDER_TOASTS = <?php echo ($canSelectUser && (int)$selectedUserId !== (int)$userId) ? 'true' : 'false'; ?>;
+    var SUPPRESS_REMINDER_TOASTS = <?php echo ($canSelectUser && (int)$selectedAdminId !== (int)$adminId) ? 'true' : 'false'; ?>;
     function weekdayName(dateStr){
       try {
         const d = new Date(dateStr);
@@ -3243,7 +3245,7 @@ foreach ($todos as $t) {
       var ownerName = btn.getAttribute('data-cat-owner') || '';
       var shareStr = btn.getAttribute('data-cat-shares') || '';
       var shareIds = shareStr ? shareStr.split(',').filter(Boolean) : [];
-      var shareInputs = modal.querySelectorAll('input[name="share_user_ids[]"]');
+      var shareInputs = modal.querySelectorAll('input[name="share_admin_ids[]"]');
       shareInputs.forEach(function(inp){ inp.checked = shareIds.includes(inp.value); });
       if (nameInput) nameInput.value = catName;
       if (idInput) idInput.value = catId;
