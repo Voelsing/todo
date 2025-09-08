@@ -1,0 +1,110 @@
+-- Ziel: Schema auf "admins" statt "users" umstellen
+-- Annahme: Tabelle `admins` existiert mit Primärschlüssel `id` (INT)
+
+SET SQL_MODE = "NO_AUTO_VALUE_ON_ZERO";
+START TRANSACTION;
+SET time_zone = "+00:00";
+/*!40101 SET NAMES utf8mb4 */;
+
+-- Saubere Neuaufnahme
+DROP TABLE IF EXISTS `todo_category_shares`;
+DROP TABLE IF EXISTS `todo_assignees`;
+DROP TABLE IF EXISTS `todo_categories`;
+DROP TABLE IF EXISTS `todos`;
+
+-- -------------------------
+-- todos
+-- -------------------------
+CREATE TABLE `todos` (
+  `id` int(11) NOT NULL,
+  `admin_id` int(11) NOT NULL,                              -- vormals user_id
+  `title` varchar(100) DEFAULT NULL,
+  `description` text NOT NULL,
+  `week_start` date NOT NULL,
+  `todo_date` date NOT NULL,
+  `priority` enum('hoch','mittel','niedrig') NOT NULL DEFAULT 'mittel',
+  `start_time` time DEFAULT NULL,
+  `due_date` date DEFAULT NULL,
+  `due_time` time DEFAULT NULL,
+  `repeat_freq` enum('none','daily','weekly','monthly') NOT NULL DEFAULT 'none',
+  `repeat_until` date DEFAULT NULL,
+  `archived` tinyint(1) NOT NULL DEFAULT 0,
+  `archived_at` datetime DEFAULT NULL,
+  `sort_order` int(11) DEFAULT NULL,
+  `created_by_admin` int(11) DEFAULT NULL,                  -- vormals created_by
+  `in_progress_by_admin` int(11) DEFAULT NULL,              -- vormals in_progress_by
+  `in_progress_at` datetime DEFAULT NULL,
+  `category_id` int(11) DEFAULT NULL,
+  `remind_at` datetime DEFAULT NULL,
+  `reminder_sent_at` datetime DEFAULT NULL,
+  `snooze_until` datetime DEFAULT NULL,
+  `is_done` tinyint(1) NOT NULL DEFAULT 0 COMMENT '0=offen,1=erledigt,2=in_bearbeitung',
+  `created_at` datetime NOT NULL DEFAULT current_timestamp(),
+  `completed_at` datetime DEFAULT NULL,
+  `completed_by_admin` int(11) DEFAULT NULL,                -- vormals completed_by
+  `sent_scope` enum('single','users','all') NOT NULL DEFAULT 'single',
+  `dispatch_group` varchar(32) DEFAULT NULL,
+  `is_forwarded` tinyint(1) NOT NULL DEFAULT 0,
+  CONSTRAINT `pk_todos` PRIMARY KEY (`id`),
+  KEY `idx_admin_week` (`admin_id`,`week_start`),
+  KEY `idx_admin_date` (`admin_id`,`todo_date`),
+  KEY `idx_category` (`category_id`),
+  CONSTRAINT `fk_todos_admin`            FOREIGN KEY (`admin_id`)            REFERENCES `admins` (`id`) ON DELETE RESTRICT,
+  CONSTRAINT `fk_todos_created_by_admin` FOREIGN KEY (`created_by_admin`)    REFERENCES `admins` (`id`) ON DELETE SET NULL,
+  CONSTRAINT `fk_todos_in_prog_admin`    FOREIGN KEY (`in_progress_by_admin`)REFERENCES `admins` (`id`) ON DELETE SET NULL,
+  CONSTRAINT `fk_todos_completed_by`     FOREIGN KEY (`completed_by_admin`)  REFERENCES `admins` (`id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+
+-- Auto-Increment
+ALTER TABLE `todos`
+  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=511;
+
+-- -------------------------
+-- todo_assignees
+-- -------------------------
+CREATE TABLE `todo_assignees` (
+  `todo_id` int(11) NOT NULL,
+  `admin_id` int(11) NOT NULL,                              -- vormals user_id
+  CONSTRAINT `pk_todo_assignees` PRIMARY KEY (`todo_id`,`admin_id`),
+  KEY `idx_ta_admin` (`admin_id`),
+  CONSTRAINT `fk_ta_todo`   FOREIGN KEY (`todo_id`)  REFERENCES `todos` (`id`)    ON DELETE CASCADE,
+  CONSTRAINT `fk_ta_admin`  FOREIGN KEY (`admin_id`) REFERENCES `admins` (`id`)   ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+
+-- -------------------------
+-- todo_categories
+-- -------------------------
+CREATE TABLE `todo_categories` (
+  `id` int(11) NOT NULL,
+  `name` varchar(100) NOT NULL,
+  `sort_order` int(11) DEFAULT NULL,
+  `owner_admin_id` int(11) DEFAULT NULL,                    -- vormals owner_id
+  `created_by_admin` int(11) DEFAULT NULL,                  -- vormals created_by
+  `created_at` datetime NOT NULL DEFAULT current_timestamp(),
+  CONSTRAINT `pk_todo_categories` PRIMARY KEY (`id`),
+  KEY `idx_owner_admin` (`owner_admin_id`),
+  KEY `idx_created_by_admin` (`created_by_admin`),
+  CONSTRAINT `fk_cat_owner_admin`   FOREIGN KEY (`owner_admin_id`)   REFERENCES `admins` (`id`) ON DELETE SET NULL,
+  CONSTRAINT `fk_cat_created_admin` FOREIGN KEY (`created_by_admin`) REFERENCES `admins` (`id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+
+ALTER TABLE `todo_categories`
+  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=107;
+
+-- -------------------------
+-- todo_category_shares
+-- -------------------------
+CREATE TABLE `todo_category_shares` (
+  `category_id` int(11) NOT NULL,
+  `admin_id` int(11) NOT NULL,                              -- vormals user_id
+  CONSTRAINT `pk_todo_category_shares` PRIMARY KEY (`category_id`,`admin_id`),
+  KEY `idx_share_admin` (`admin_id`),
+  CONSTRAINT `fk_share_category` FOREIGN KEY (`category_id`) REFERENCES `todo_categories` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_share_admin`    FOREIGN KEY (`admin_id`)    REFERENCES `admins` (`id`)          ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+
+COMMIT;
